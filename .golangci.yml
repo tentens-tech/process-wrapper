@@ -1,0 +1,34 @@
+run:
+  concurrency: 4
+  tests: false
+
+issues:
+  exclude-dirs:
+    - ^cmd/
+    - ^examples/
+    - ^deployment/
+  exclude-files:
+    - ^pkg/stat/tcp_connections.go
+    - ^pkg/stat/transport.go
+
+linters:
+  disable-all: true
+  enable:
+    - staticcheck
+    - gosimple
+    - ineffassign
+    - typecheck
+    - govet
+    - unused
+    - stylecheck
+    - gosec
+    - unconvert
+    - gocyclo
+    - misspell
+    - unparam
+    - exportloopref
+    - gocritic
+    - asciicheck
+    - bodyclose
+    - revive
+

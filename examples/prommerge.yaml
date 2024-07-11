@@ -1,0 +1,21 @@
+- name: "prommerge"
+  entrypoint: "sleep"
+  #promTarget: "http://localhost:10000/metrics1"
+  args:
+    - "2000"
+- name: "prommerge2"
+  entrypoint: "sleep"
+  #promTarget: "http://localhost:10000/metrics2"
+  args:
+    - "2000"
+- name: "prommerge3"
+  entrypoint: "sleep"
+  #promTarget: "http://localhost:10000/metrics3"
+  args:
+    - "2000"
+  readiness:
+    delay: "1s"
+    period: "1s"
+    failureThreshold: 3
+    file:
+      path: "111"

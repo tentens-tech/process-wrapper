@@ -1,0 +1,27 @@
+- name: "app"
+  entrypoint: "sleep"
+  args:
+    - "10000"
+  envs:
+    AMQP_PROBE_RABBITMQ_DSN_TEMPLATE: "amqp://%v:%v@localhost:5673"
+    AMQP_PROBE_RABBITMQ_USER: "guest"
+    AMQP_PROBE_RABBITMQ_PASS: "guest"
+  readiness:
+    delay: "2s"
+    period: "3s"
+    failureThreshold: 3
+    amqp: {}
+      #reuseConn: false
+
+# docker run -it --rm --name rabbitmq -v /tmp/amqp/:/var/lib/rabbitmq/ -p 5672:5672 -p 15672:15672 rabbitmq:3-management
+#docker run -it --rm --name amqproxy -p 5673:5673 -e AMQP_URL=amqp://172.17.0.2:5672  amqproxy:0.0.6
+#- name: "rabbitmq-docker"
+#  entrypoint: "sh"
+#  args:
+#    - -c
+#    - "docker run -t --rm --name rabbitmq --hostname=rabbitmq -v /tmp/amqp/:/var/lib/rabbitmq/ -p 5672:5672 -p 15672:15672 rabbitmq:3-management"
+#- name: "amqproxy-docker"
+#  entrypoint: "sh"
+#  args:
+#    - -c
+#    - "exec docker run -t --rm --name amqproxy -p 5673:5673 -e AMQP_URL=amqp://172.17.0.2:5672 amqproxy:0.0.6"

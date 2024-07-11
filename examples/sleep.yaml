@@ -1,0 +1,15 @@
+- name: "sleep1"
+  entrypoint: "sleep"
+  #replicas: 10
+  args:
+    - "2000"
+  readiness:
+    delay: "5s"
+    period: "5s"
+    failureThreshold: 3
+    file:
+      path: "main.go1"
+  #  heartBeat:
+  #    period: "10s"
+
+

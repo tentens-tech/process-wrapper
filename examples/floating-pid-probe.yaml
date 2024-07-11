@@ -1,0 +1,12 @@
+- name: "restarts"
+  entrypoint: "sh"
+  args:
+    - "-c"
+    - "go run cmd/http/main.go"
+  readiness:
+    #delay: "5s"
+    #period: "5s"
+    #failureThreshold: 3
+    floatingPid: {}
+      #period: "10s"
+      #threshold: 1 # must be <10

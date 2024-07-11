@@ -1,0 +1,13 @@
+- name: "prommerge"
+  entrypoint: "sleep"
+  promTarget: "http://localhost:10000/metrics1"
+  args:
+    - "2000"
+  readiness:
+    delay: "1s"
+    period: "1s"
+    failureThreshold: 3
+    lock:
+      ttlDuration: "1s"
+    file:
+      path: "111"

@@ -1,0 +1,10 @@
+- name: "termination-delay"
+  replicas: 3
+  entrypoint: "./term-delay"
+  args:
+    - "-delay=8s"
+
+
+
+
+

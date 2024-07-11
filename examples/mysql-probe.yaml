@@ -1,0 +1,18 @@
+- name: "http-8122"
+  entrypoint: "./failure-http"
+  envs:
+    MYSQL_DSN: "admin:admin@tcp(127.0.0.1:6032)/stats"
+    LISTEN_SOCKET: ":8122"
+    FAILURE_RATIO: "0"
+  readiness:
+    delay: "5s"
+    failureThreshold: 1
+    tcp:
+      socket: ":8122"
+    sql:
+      queries:
+        - "SELECT hg.comment FROM runtime_mysql_servers ms inner join runtime_mysql_replication_hostgroups hg on ms.hostgroup_id=hg.writer_hostgroup WHERE ms.status = 'ONLINE'"
+        - "SELECT hg.comment FROM runtime_mysql_servers ms inner join runtime_mysql_replication_hostgroups hg on ms.hostgroup_id=hg.reader_hostgroup WHERE ms.status = 'ONLINE'"
+      contains:
+        - "monolith"
+        - "payments"

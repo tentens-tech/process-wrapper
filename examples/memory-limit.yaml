@@ -1,0 +1,9 @@
+# docker run -it --name mem-leak --rm -v `pwd`:/app golang:1.22 bash
+# cd /app
+# go build -o mem-leak cmd/mem-leak/main.go
+# NODE_NAME=gke HOSTNAME=docker HANDLE_PREEMPTION=false go run -race main.go -config=examples/memory-limit.yaml -debug
+- name: "oom"
+  entrypoint: "./mem-leak"
+  args:
+    - "-iterations=20000000" # ~470MB memory usage
+  memoryLimitMB: 100

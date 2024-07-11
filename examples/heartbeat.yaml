@@ -1,0 +1,10 @@
+- name: "heart"
+  entrypoint: "sleep"
+  args:
+    - "10000"
+  readiness:
+    delay: "5s"
+    period: "10s"
+    failureThreshold: 10
+    heartBeat:
+      period: "10s"

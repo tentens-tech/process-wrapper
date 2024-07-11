@@ -1,0 +1,10 @@
+- name: "sleep1"
+  entrypoint: "sleep"
+  args:
+    - "200000"
+  readiness:
+    delay: "1s"
+    period: "1s"
+    failureThreshold: 3
+    lock:
+      ttlDuration: "1s"

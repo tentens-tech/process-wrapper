@@ -1,0 +1,8 @@
+- name: "printenv"
+  envsFile: "vault"
+  entrypoint: "sh"
+  args:
+    - "-c"
+    - "sleep 10"
+  envs:
+    QQQ: "AAA"
