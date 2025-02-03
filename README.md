@@ -97,8 +97,8 @@ make docker-build-slim
 ### Build/Push
 ```sh
 export VERSION=0.1.8
-docker build -t us.gcr.io/production-4f83b34d/process-wrapper:${VERSION} -f deployment/docker/Dockerfile .
-docker push us.gcr.io/production-4f83b34d/process-wrapper:${VERSION}
+docker build -t process-wrapper:${VERSION} -f deployment/docker/Dockerfile .
+docker push process-wrapper:${VERSION}
 ```
 
 ### Deploy process-wrapper inject example
