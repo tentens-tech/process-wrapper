@@ -52,6 +52,7 @@ type State struct {
 	PreemptedCancel  context.CancelFunc
 	killedMap        map[string]bool
 	statusMap        map[string]bool
+	startFailedMap   map[string]bool
 	pidsMap          map[string]int
 	floatingPid      map[string][]time.Time
 	heartBeat        map[string]time.Time
@@ -65,6 +66,7 @@ func NewState(readinessFile string, envoyDrain bool) *State {
 	s := State{
 		pidsMap:          make(map[string]int),
 		statusMap:        make(map[string]bool),
+		startFailedMap:   make(map[string]bool),
 		killedMap:        make(map[string]bool),
 		floatingPid:      make(map[string][]time.Time),
 		heartBeat:        make(map[string]time.Time),
@@ -108,6 +110,28 @@ func (s *State) RemoveState(name string) {
 	s.Lock()
 	delete(s.statusMap, name)
 	s.Unlock()
+}
+
+// SetStartFailed tracks commands that cannot be started
+// A start failure makes the readiness unhealthy but keeps the liveness, so other commands keep running
+func (s *State) SetStartFailed(name string, failed bool) {
+	s.Lock()
+	defer s.Unlock()
+	if failed {
+		s.startFailedMap[name] = true
+		return
+	}
+	delete(s.startFailedMap, name)
+}
+
+// StartFailed returns a name of a command that cannot be started
+func (s *State) StartFailed() (string, bool) {
+	s.RLock()
+	defer s.RUnlock()
+	for name := range s.startFailedMap {
+		return name, true
+	}
+	return "", false
 }
 
 func (s *State) SetHeartBeat(name string, t time.Time) {
@@ -390,6 +414,9 @@ func (s *State) CreateReadinessFile() {
 				unhealthy++
 			}
 		}
+		if _, failed := s.StartFailed(); failed {
+			unhealthy++
+		}
 		if unhealthy == 0 {
 			err := os.WriteFile(s.ReadinessFile, []byte{}, 0600)
 			if err != nil {
@@ -411,6 +438,10 @@ func (s *State) RemoveReadinessFile() {
 
 func (s *State) Readiness() bool {
 	if s.IsPreempted() {
+		return false
+	}
+	if name, failed := s.StartFailed(); failed {
+		log.WithFields(log.Fields{"name": name}).Warnf("Appliction is degraded, command cannot be started")
 		return false
 	}
 	for name, state := range s.ProcessState() {

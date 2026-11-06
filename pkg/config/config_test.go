@@ -126,7 +126,10 @@ func TestHelloAll(t *testing.T) {
 					t.Logf("Start %v command", commands[i].Name)
 					t.Logf("%+v", commands[i].Envs)
 					commands[i].SetState(s)
-					envs := commands[i].MergeEnvs()
+					envs, mergeErr := commands[i].MergeEnvs()
+					if mergeErr != nil {
+						t.Errorf("Failed to merge envs, %v", mergeErr)
+					}
 					t.Logf("Envs: %+v", envs)
 					go commands[i].Run(ctx, &wg)
 				}
