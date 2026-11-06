@@ -4,15 +4,23 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	log "github.com/sirupsen/logrus"
 	"os/exec"
+	"syscall"
 	"time"
 )
 
 const (
 	DefaultHookDeadlineSeconds = 30
+	// MaxHookOutputBytes bounds how much of each command hook stream (stdout
+	// and stderr separately) the supervisor keeps. A hook that writes more is
+	// killed and the rest of its output is discarded.
+	MaxHookOutputBytes = 64 * 1024
 )
+
+var errHookOutputLimit = errors.New("hook output limit exceeded")
 
 type Hook struct {
 	SQL      *SQLHook          `yaml:"sql"`
@@ -91,8 +99,50 @@ func validateArgs(args []string) []string {
 	return validated
 }
 
+// cappedBuffer keeps at most limit bytes. The first write past the limit
+// stores what still fits, calls onOverflow and fails, so exec stops copying
+// and closes its end of the pipe.
+type cappedBuffer struct {
+	buf        bytes.Buffer
+	limit      int
+	overflowed bool
+	onOverflow func()
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if b.overflowed {
+		return 0, errHookOutputLimit
+	}
+	room := b.limit - b.buf.Len()
+	if len(p) <= room {
+		return b.buf.Write(p)
+	}
+	n, _ := b.buf.Write(p[:room])
+	b.overflowed = true
+	b.onOverflow()
+	return n, errHookOutputLimit
+}
+
+// hookProcAttr returns a copy of attr that runs the hook in its own process
+// group when the configuration allows it, and whether the hook's pid is also
+// its process group id.
+func hookProcAttr(attr *syscall.SysProcAttr) (*syscall.SysProcAttr, bool) {
+	a := &syscall.SysProcAttr{}
+	if attr != nil {
+		copied := *attr
+		a = &copied
+	}
+	if !a.Setsid && !a.Setpgid && !a.Foreground {
+		a.Setpgid = true
+		a.Pgid = 0
+	}
+	return a, a.Setsid || a.Pgid == 0
+}
+
 func (c *Command) RunHook(ctx context.Context, name string, envs map[string]string) bool {
-	var stdout, stderr bytes.Buffer
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	args := validateArgs(c.Args)
 	cmd := exec.CommandContext(ctx, c.Entrypoint, args...) // #nosec G204
 	for k, v := range envs {
@@ -100,21 +150,40 @@ func (c *Command) RunHook(ctx context.Context, name string, envs map[string]stri
 	}
 	if c.SysProcAttr != nil {
 		log.WithFields(log.Fields{"name": name}).Printf("Set hook command process attributes")
-		cmd.SysProcAttr = c.SysProcAttr
 	}
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	defer func() {
-		o := stdout.String()
-		if o != "" {
-			log.WithFields(log.Fields{"name": name, "hook": "command"}).Printf("%v", o)
+	var ownGroup bool
+	cmd.SysProcAttr, ownGroup = hookProcAttr(c.SysProcAttr)
+	cmd.Cancel = func() error {
+		if ownGroup {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		}
-		r := stderr.String()
-		if r != "" {
-			log.WithFields(log.Fields{"name": name, "hook": "command"}).Warnf("%v", r)
+		return cmd.Process.Kill()
+	}
+
+	stdout := &cappedBuffer{limit: MaxHookOutputBytes, onOverflow: cancel}
+	stderr := &cappedBuffer{limit: MaxHookOutputBytes, onOverflow: cancel}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	logger := log.WithFields(log.Fields{"name": name, "hook": "command"})
+	defer func() {
+		if o := stdout.buf.String(); o != "" {
+			logger.Printf("%v", o)
+		}
+		if r := stderr.buf.String(); r != "" {
+			logger.Warnf("%v", r)
+		}
+		if stdout.overflowed {
+			logger.Errorf("Command hook stdout exceeded %v bytes, the rest was discarded", MaxHookOutputBytes)
+		}
+		if stderr.overflowed {
+			logger.Errorf("Command hook stderr exceeded %v bytes, the rest was discarded", MaxHookOutputBytes)
 		}
 	}()
 	err := cmd.Run()
+	if stdout.overflowed || stderr.overflowed {
+		log.WithFields(log.Fields{"name": name}).Errorf("Command %v hook was killed, output limit of %v bytes exceeded", c.String(), MaxHookOutputBytes)
+		return false
+	}
 	if err != nil {
 		log.WithFields(log.Fields{"name": name}).Errorf("Command %v hook executed with an error: %v", c.String(), err)
 		return false

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"github.com/go-logfmt/logfmt"
 	log "github.com/sirupsen/logrus"
@@ -27,6 +28,9 @@ const (
 	DefaultSharedLockKeepAliveEndpoint = "/keepalive"
 	RestartPolicyAlways                = "always"
 	RestartPolicyNewer                 = "never"
+	// MaxOutputLineBytes bounds how much of one command output line is held
+	// in memory. Longer lines are logged in chunks of this size.
+	MaxOutputLineBytes = 64 * 1024
 )
 
 var (
@@ -350,13 +354,13 @@ func (c *Command) Run(ctx context.Context, wg *sync.WaitGroup) {
 		preStartLogger.Errorf("Cannot connect command stdout, %v", err)
 	}
 	defer stdout.Close()
-	stdoutReader := bufio.NewReader(stdout)
+	stdoutReader := bufio.NewReaderSize(stdout, MaxOutputLineBytes)
 	stderr, err = cmd.StderrPipe()
 	if err != nil {
 		preStartLogger.Errorf("Cannot connect command stderr, %v", err)
 	}
 	defer stderr.Close()
-	stderrReader := bufio.NewReader(stderr)
+	stderrReader := bufio.NewReaderSize(stderr, MaxOutputLineBytes)
 
 	if c.SysProcAttr != nil {
 		log.Printf("Set process attributes")
@@ -649,7 +653,7 @@ func (c *Command) ProcessOutput(b *bufio.Reader, pid int) {
 		logFormat = c.LogFormat
 	}
 	for {
-		out, err := b.ReadString('\n')
+		out, err := readOutputLine(b)
 		if err != nil {
 			log.WithFields(log.Fields{"name": c.Name}).Debugf("Stop process output routine")
 			return
@@ -711,6 +715,16 @@ func (c *Command) ProcessOutput(b *bufio.Reader, pid int) {
 			}
 		}
 	}
+}
+
+// readOutputLine returns the next line from b, or the next b.Size() bytes of
+// it when the line does not fit in the reader's buffer.
+func readOutputLine(b *bufio.Reader) (string, error) {
+	line, err := b.ReadSlice('\n')
+	if errors.Is(err, bufio.ErrBufferFull) {
+		err = nil
+	}
+	return string(line), err
 }
 
 func removeQuotes(s string) string {
