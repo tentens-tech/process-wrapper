@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"fmt"
 	log "github.com/sirupsen/logrus"
-	"os/exec"
 	"time"
 )
 
@@ -94,7 +93,7 @@ func validateArgs(args []string) []string {
 func (c *Command) RunHook(ctx context.Context, name string, envs map[string]string) bool {
 	var stdout, stderr bytes.Buffer
 	args := validateArgs(c.Args)
-	cmd := exec.CommandContext(ctx, c.Entrypoint, args...) // #nosec G204
+	cmd := newSupervisedCmd(ctx, c.Entrypoint, args...)
 	for k, v := range envs {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%v=%v", k, v))
 	}
