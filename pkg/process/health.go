@@ -2,7 +2,6 @@ package process
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/username1366/prommerge"
@@ -58,7 +57,20 @@ type State struct {
 	cancelRoutineMap map[string]context.CancelFunc
 	preemptedEvent   chan struct{}
 	M                *metrics.Server
+	mux              *http.ServeMux
+	muxOnce          sync.Once
 	sync.RWMutex
+}
+
+// Mux returns the handler set served on the health socket. Routes must be
+// registered here explicitly; the health listener never falls back to
+// http.DefaultServeMux, so handlers that dependencies register globally
+// (expvar, x/net/trace) are not exposed on the probe port.
+func (s *State) Mux() *http.ServeMux {
+	s.muxOnce.Do(func() {
+		s.mux = http.NewServeMux()
+	})
+	return s.mux
 }
 
 func NewState(readinessFile string, envoyDrain bool) *State {
@@ -130,16 +142,6 @@ func (s *State) GetHeartBeat(name string) time.Time {
 	return s.heartBeat[name]
 }
 
-func (s *State) GetAllHeartBeat() map[string]time.Time {
-	s.RLock()
-	defer s.RUnlock()
-	heartBeat := make(map[string]time.Time, len(s.heartBeat))
-	for k, v := range s.heartBeat {
-		heartBeat[k] = v
-	}
-	return heartBeat
-}
-
 func (s *State) SetPid(name string, pid int) {
 	s.Lock()
 	s.pidsMap[name] = pid
@@ -197,16 +199,6 @@ func (s *State) GetPids() []int {
 		pids = append(pids, pid)
 	}
 	defer s.RUnlock()
-	return pids
-}
-
-func (s *State) GetPidsMap() map[string]int {
-	s.RLock()
-	pids := make(map[string]int, len(s.pidsMap))
-	for k, v := range s.pidsMap {
-		pids[k] = v
-	}
-	s.RUnlock()
 	return pids
 }
 
@@ -440,7 +432,8 @@ func (s *State) HealthEndpoint() {
 	if socket == "" {
 		socket = defaultSocket
 	}
-	http.HandleFunc("/readiness", func(w http.ResponseWriter, r *http.Request) {
+	mux := s.Mux()
+	mux.HandleFunc("/readiness", func(w http.ResponseWriter, r *http.Request) {
 		log.Debugf("GET /readiness")
 		if r.URL.Query().Has("wait") {
 			for {
@@ -459,7 +452,7 @@ func (s *State) HealthEndpoint() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 	})
-	http.HandleFunc("/liveness", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/liveness", func(w http.ResponseWriter, r *http.Request) {
 		log.Debugf("GET /liveness")
 		if r.URL.Query().Has("wait") {
 			for {
@@ -478,94 +471,26 @@ func (s *State) HealthEndpoint() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 	})
-	http.HandleFunc("/pidof", func(w http.ResponseWriter, r *http.Request) {
-		log.Debugf("GET /pidof")
+	// Write-only: supervised commands report heartbeats here, but the stored
+	// timestamps are never returned to the caller.
+	mux.HandleFunc("/heartbeat", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			w.Header().Set("Allow", http.MethodPatch)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		log.Debugf("PATCH /heartbeat")
 		name := r.URL.Query().Get("name")
 		if name == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		pid := s.GetPid(name)
-		log.Debugf("PID of %v: %v", name, pid)
-		if pid == 0 {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, err := w.Write([]byte(fmt.Sprintf("%v", pid)))
-		if err != nil {
-			log.Errorf("Failed to write response for /pidof endpoint, %v", err)
-		}
-	})
-	http.HandleFunc("/pids", func(w http.ResponseWriter, _ *http.Request) {
-		log.Debugf("GET /pids")
-		pids := s.GetPidsMap()
-		if len(pids) == 0 {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		log.Debugf("PIDs map %+v", pids)
-		jData, err := json.Marshal(pids)
-		if err != nil {
-			log.Errorf("Failed to marshal /pids body payload")
-			w.WriteHeader(http.StatusInternalServerError)
-		}
-		w.WriteHeader(http.StatusOK)
-		_, err = w.Write(jData)
-		if err != nil {
-			log.Errorf("Failed to write response for /pids endpoint, %v", err)
-		}
-	})
-	http.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
-		log.Debugf("GET /status")
-		state := s.ProcessState()
-		if len(state) == 0 {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		log.Debugf("Process state map %+v", state)
-		w.WriteHeader(http.StatusOK)
-		_, err := w.Write(s.httpSerializer(state))
-		if err != nil {
-			log.Errorf("Failed to write response for /status endpoint, %v", err)
-		}
-	})
-
-	http.HandleFunc("/heartbeat", func(w http.ResponseWriter, r *http.Request) {
-		log.Debugf("GET /heartbeat")
-		name := r.URL.Query().Get("name")
-		if name == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		switch r.Method {
-		case http.MethodGet:
-			if name == "" {
-				w.WriteHeader(http.StatusCreated)
-				_, err := w.Write(s.httpSerializer(s.GetAllHeartBeat()))
-				if err != nil {
-					log.Errorf("Failed to write response for /heaerbeat endpoint, %v", err)
-				}
-				return
-			}
-			t := s.GetHeartBeat(name)
-			resp := fmt.Sprintf(`{"name": "%v", "lastHeartBeat": "%v"}`, name, t.String())
-			_, err := w.Write([]byte(resp))
-			if err != nil {
-				log.Errorf("Failed to write response for /heaerbeat endpoint, %v", err)
-			}
-			return
-		case http.MethodPatch:
-			s.SetHeartBeat(name, time.Now())
-			w.WriteHeader(http.StatusAccepted)
-			return
-
-		}
+		s.SetHeartBeat(name, time.Now())
+		w.WriteHeader(http.StatusAccepted)
 	})
 	server := &http.Server{
 		Addr:         socket,
-		Handler:      nil, // You can set your handler here
+		Handler:      mux,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 	}
@@ -587,7 +512,7 @@ func (s *State) GetReadyPromTargets(targets []prommerge.PromTarget) []prommerge.
 }
 
 func (s *State) PromMergeHandler(targets []prommerge.PromTarget, opts prommerge.PromDataOpts) {
-	http.HandleFunc("/prommerge", func(writer http.ResponseWriter, request *http.Request) {
+	s.Mux().HandleFunc("/prommerge", func(writer http.ResponseWriter, request *http.Request) {
 		pd := prommerge.NewPromData(s.GetReadyPromTargets(targets), opts)
 		t := time.Now()
 		err := pd.CollectTargets()
@@ -615,12 +540,4 @@ func (s *State) PromMergeHandler(targets []prommerge.PromTarget, opts prommerge.
 		metrics.SidecarMetricsMergeDurationSecondsBucket.With(prometheus.Labels{}).Observe(total.Seconds())
 		writer.Write([]byte(promOutput))
 	})
-}
-
-func (s *State) httpSerializer(in any) []byte {
-	jData, err := json.Marshal(in)
-	if err != nil {
-		log.Errorf("Failed to marshal http body payload %+v, %v", in, err)
-	}
-	return jData
 }

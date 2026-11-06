@@ -232,7 +232,7 @@ func StartProcessWrapper() {
 
 	commands := cfg.Load()
 	PrintConfigJson(config.ToJSON(commands))
-	go metrics.PrometheusHandler()
+	metrics.PrometheusHandler(state.Mux())
 
 	opts := prommerge.PromDataOpts{
 		EmptyOnFailure: promMergeEmptyOnFailure,
