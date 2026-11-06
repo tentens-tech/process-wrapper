@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"fmt"
 	log "github.com/sirupsen/logrus"
 	"os/exec"
+	"syscall"
 	"time"
 )
 
@@ -21,7 +21,9 @@ type Hook struct {
 	Deadline Duration          `yaml:"deadline"`
 }
 
-func (h *Hook) Run(parent context.Context, name string, envs map[string]string) bool {
+// Run executes the hooks. envs is used by in-process hooks only; a command hook
+// gets h.Envs and its own envs, and runs with the identity of supervised.
+func (h *Hook) Run(parent context.Context, name string, envs map[string]string, supervised *syscall.SysProcAttr) bool {
 	if h == nil {
 		return true
 	}
@@ -39,7 +41,7 @@ func (h *Hook) Run(parent context.Context, name string, envs map[string]string) 
 	}
 	if h.Command != nil {
 		log.WithFields(log.Fields{"name": name}).Printf("Run command hook")
-		s := h.Command.RunHook(ctx, name, envs)
+		s := h.Command.RunHook(ctx, name, h.Envs, supervised)
 		state = append(state, s)
 	}
 	for _, s := range state {
@@ -91,16 +93,19 @@ func validateArgs(args []string) []string {
 	return validated
 }
 
-func (c *Command) RunHook(ctx context.Context, name string, envs map[string]string) bool {
+func (c *Command) RunHook(ctx context.Context, name string, hookEnvs map[string]string, supervised *syscall.SysProcAttr) bool {
 	var stdout, stderr bytes.Buffer
+	attr, err := childSysProcAttr(c.SysProcAttr, supervised)
+	if err != nil {
+		log.WithFields(log.Fields{"name": name}).Errorf("Command %v hook is not executed: %v", c.String(), err)
+		return false
+	}
 	args := validateArgs(c.Args)
 	cmd := exec.CommandContext(ctx, c.Entrypoint, args...) // #nosec G204
-	for k, v := range envs {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("%v=%v", k, v))
-	}
-	if c.SysProcAttr != nil {
+	cmd.Env = childEnv(hookEnvs, c.Envs)
+	if attr != nil {
 		log.WithFields(log.Fields{"name": name}).Printf("Set hook command process attributes")
-		cmd.SysProcAttr = c.SysProcAttr
+		cmd.SysProcAttr = attr
 	}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -114,7 +119,7 @@ func (c *Command) RunHook(ctx context.Context, name string, envs map[string]stri
 			log.WithFields(log.Fields{"name": name, "hook": "command"}).Warnf("%v", r)
 		}
 	}()
-	err := cmd.Run()
+	err = cmd.Run()
 	if err != nil {
 		log.WithFields(log.Fields{"name": name}).Errorf("Command %v hook executed with an error: %v", c.String(), err)
 		return false
