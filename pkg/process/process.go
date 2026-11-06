@@ -435,7 +435,7 @@ func (c *Command) Run(ctx context.Context, wg *sync.WaitGroup) {
 
 // PostStartHookRunner executes a hook command and sets the status to the state
 func (c *Command) PostStartHookRunner(ctx context.Context, envs map[string]string) bool {
-	s := c.PostStart.Run(ctx, c.Name, envs)
+	s := c.PostStart.Run(ctx, c.Name, envs, c.sandbox())
 	switch s {
 	case true:
 		c.s.SetState(c.Name, true)
@@ -533,7 +533,7 @@ func (c *Command) ProbeRunner(ctx context.Context, cancelRoutines context.Cancel
 				status = append(status, s)
 			}
 			if c.Readiness.Exec != nil {
-				s := HealthRun(c.Name, c.Readiness.Exec, c.s.M)
+				s := HealthRun(c.Name, c.Readiness.Exec.bind(ctx, c.sandbox()), c.s.M)
 				status = append(status, s)
 			}
 			if c.Readiness.SQL != nil {
