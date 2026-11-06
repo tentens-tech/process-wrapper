@@ -37,8 +37,8 @@ var (
 	SidecarMetricsMergeDurationSecondsBucket *prometheus.HistogramVec
 )
 
-func PrometheusHandler() {
-	http.Handle("/metrics", promhttp.Handler())
+func PrometheusHandler(mux *http.ServeMux) {
+	mux.Handle("/metrics", promhttp.Handler())
 }
 
 func init() {
