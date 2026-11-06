@@ -21,7 +21,7 @@ type Hook struct {
 	Deadline Duration          `yaml:"deadline"`
 }
 
-func (h *Hook) Run(parent context.Context, name string, envs map[string]string) bool {
+func (h *Hook) Run(parent context.Context, name string, envs map[string]string, sb sandbox) bool {
 	if h == nil {
 		return true
 	}
@@ -39,7 +39,7 @@ func (h *Hook) Run(parent context.Context, name string, envs map[string]string) 
 	}
 	if h.Command != nil {
 		log.WithFields(log.Fields{"name": name}).Printf("Run command hook")
-		s := h.Command.RunHook(ctx, name, envs)
+		s := h.Command.RunHook(ctx, name, envs, sb)
 		state = append(state, s)
 	}
 	for _, s := range state {
@@ -91,17 +91,16 @@ func validateArgs(args []string) []string {
 	return validated
 }
 
-func (c *Command) RunHook(ctx context.Context, name string, envs map[string]string) bool {
+func (c *Command) RunHook(ctx context.Context, name string, envs map[string]string, sb sandbox) bool {
 	var stdout, stderr bytes.Buffer
 	args := validateArgs(c.Args)
 	cmd := exec.CommandContext(ctx, c.Entrypoint, args...) // #nosec G204
+	// A nil Env would make the hook inherit the supervisor environment.
+	cmd.Env = make([]string, 0, len(envs))
 	for k, v := range envs {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%v=%v", k, v))
 	}
-	if c.SysProcAttr != nil {
-		log.WithFields(log.Fields{"name": name}).Printf("Set hook command process attributes")
-		cmd.SysProcAttr = c.SysProcAttr
-	}
+	sb.apply(cmd, c.SysProcAttr)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	defer func() {
