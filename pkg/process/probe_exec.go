@@ -5,6 +5,7 @@ import (
 	"fmt"
 	log "github.com/sirupsen/logrus"
 	"os/exec"
+	"syscall"
 	"time"
 )
 
@@ -14,6 +15,8 @@ const (
 
 type ExecProbe struct {
 	Command Command `yaml:"command"`
+	// supervised is the SysProcAttr of the command the probe checks.
+	supervised *syscall.SysProcAttr
 }
 
 func (p ExecProbe) String() string {
@@ -21,6 +24,12 @@ func (p ExecProbe) String() string {
 }
 
 func (p ExecProbe) Run(name string) bool {
+	attr, err := childSysProcAttr(p.Command.SysProcAttr, p.supervised)
+	if err != nil {
+		log.WithFields(log.Fields{"name": name, "command": p.Command.String()}).Errorf("Exec probe is not executed: %v", err)
+		return false
+	}
+
 	exitCode := make(chan int, 1)
 
 	t := time.NewTicker(time.Second * ExecProbeTimeout)
@@ -28,9 +37,8 @@ func (p ExecProbe) Run(name string) bool {
 	go func() {
 		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(time.Second*ExecProbeTimeout))
 		cmd := exec.CommandContext(ctx, p.Command.Entrypoint, p.Command.Args...) // #nosec G204
-		for k, v := range p.Command.Envs {
-			cmd.Env = append(cmd.Env, fmt.Sprintf("%v=%v", k, v))
-		}
+		cmd.Env = childEnv(p.Command.Envs)
+		cmd.SysProcAttr = attr
 		err := cmd.Run()
 		if err != nil {
 			log.WithFields(log.Fields{"name": name, "command": p.Command.String()}).Warnf("Exec probe failure, %v", err)
