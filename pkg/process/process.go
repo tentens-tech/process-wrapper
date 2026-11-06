@@ -27,6 +27,8 @@ const (
 	DefaultSharedLockKeepAliveEndpoint = "/keepalive"
 	RestartPolicyAlways                = "always"
 	RestartPolicyNewer                 = "never"
+	StartRetryInitialDelay             = time.Second
+	StartRetryMaxDelay                 = time.Second * 30
 )
 
 var (
@@ -155,7 +157,7 @@ func (c *Command) String() string {
 	return cmd
 }
 
-func (c *Command) MergeEnvs() map[string]string {
+func (c *Command) MergeEnvs() (map[string]string, error) {
 	var err error
 	envs := make(map[string]string, len(os.Environ())+len(c.Envs))
 	logger := log.WithFields(log.Fields{"name": c.Name})
@@ -181,8 +183,7 @@ func (c *Command) MergeEnvs() map[string]string {
 		var envsFile *os.File
 		envsFile, err = os.Open(c.EnvsFile)
 		if err != nil {
-			logger.Errorf("Cannot read envs file, %v", err)
-			os.Exit(1)
+			return nil, fmt.Errorf("cannot read envs file, %v", err)
 		}
 
 		fileScanner := bufio.NewScanner(envsFile)
@@ -207,7 +208,7 @@ func (c *Command) MergeEnvs() map[string]string {
 		}
 	}
 	logger.Debugf("Merged envs %+v", envs)
-	return envs
+	return envs, nil
 }
 
 // ConvertEnvs converts envs to "key=value" form
@@ -329,16 +330,54 @@ func (c *Command) AcquireSharedLock(ctx context.Context) {
 	}
 }
 
-// Run executes command with ctx cancel context
+// Run executes command with ctx cancel context and restarts it until shutdown
 // Each command runs unix signal handler and health check goroutines
+// A command that fails to start is retried with a backoff, so it never stops process-wrapper or other commands
 func (c *Command) Run(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
+	startRetryDelay := StartRetryInitialDelay
+	for {
+		started, restart := c.runOnce(ctx)
+		if !restart {
+			return
+		}
+		if started {
+			startRetryDelay = StartRetryInitialDelay
+			continue
+		}
+		log.WithFields(log.Fields{"name": c.Name, "command": c.String()}).Warnf("Retry command start in %v", startRetryDelay)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(startRetryDelay):
+		}
+		if c.s.IsShutdown() {
+			return
+		}
+		startRetryDelay = min(startRetryDelay*2, StartRetryMaxDelay)
+	}
+}
+
+// startFailed records a command start failure and reports whether the start should be retried
+func (c *Command) startFailed(ctx context.Context, logger *log.Entry, err error) bool {
+	logger.Errorf("Start command error, %v", err)
+	c.s.SetStartFailed(c.Name, true)
+	metrics.SidecarCmdReadinessCount.WithLabelValues("start_failure", c.Name, c.String()).Inc()
+	return ctx.Err() == nil && !c.s.IsShutdown()
+}
+
+// runOnce starts the command and waits for it to complete
+// It reports whether the command was started and whether it must be started again
+func (c *Command) runOnce(ctx context.Context) (bool, bool) {
 	startTime := time.Now().UTC()
 	var err error
-	cmd := exec.CommandContext(ctx, c.Entrypoint, c.Args...) // #nosec G204
-	envs := c.MergeEnvs()
-	cmd.Env = c.ConvertEnvs(envs)
 	preStartLogger := log.WithFields(log.Fields{"name": c.Name, "command": c.String()})
+	envs, err := c.MergeEnvs()
+	if err != nil {
+		return false, c.startFailed(ctx, preStartLogger, err)
+	}
+	cmd := exec.CommandContext(ctx, c.Entrypoint, c.Args...) // #nosec G204
+	cmd.Env = c.ConvertEnvs(envs)
 	if c.Dir != "" {
 		preStartLogger.Printf("Set custom process dir to %v", c.Dir)
 		cmd.Dir = c.Dir
@@ -347,13 +386,13 @@ func (c *Command) Run(ctx context.Context, wg *sync.WaitGroup) {
 	var stdout, stderr io.ReadCloser
 	stdout, err = cmd.StdoutPipe()
 	if err != nil {
-		preStartLogger.Errorf("Cannot connect command stdout, %v", err)
+		return false, c.startFailed(ctx, preStartLogger, fmt.Errorf("cannot connect command stdout, %v", err))
 	}
 	defer stdout.Close()
 	stdoutReader := bufio.NewReader(stdout)
 	stderr, err = cmd.StderrPipe()
 	if err != nil {
-		preStartLogger.Errorf("Cannot connect command stderr, %v", err)
+		return false, c.startFailed(ctx, preStartLogger, fmt.Errorf("cannot connect command stderr, %v", err))
 	}
 	defer stderr.Close()
 	stderrReader := bufio.NewReader(stderr)
@@ -367,9 +406,9 @@ func (c *Command) Run(ctx context.Context, wg *sync.WaitGroup) {
 
 	preStartLogger.Debugf("Schedule command")
 	if err = cmd.Start(); err != nil {
-		defer log.Fatalf("Start command error, %v", err)
-		return
+		return false, c.startFailed(ctx, preStartLogger, err)
 	}
+	c.s.SetStartFailed(c.Name, false)
 
 	ctxRoutines, cancelRoutines := context.WithCancel(context.Background())
 	pid := cmd.Process.Pid
@@ -414,7 +453,7 @@ func (c *Command) Run(ctx context.Context, wg *sync.WaitGroup) {
 		terminationLogger.Printf("Command completed with code %v, time %v",
 			cmd.ProcessState.ExitCode(), time.Since(startTime))
 		cancelRoutines()
-		return
+		return true, false
 	}
 
 	// Restart command if exit code or HealthChecker routine/Memory limit handler killed the process
@@ -424,13 +463,9 @@ func (c *Command) Run(ctx context.Context, wg *sync.WaitGroup) {
 		metrics.SidecarCmdReadinessCount.WithLabelValues("restart", c.Name, c.String()).Inc()
 		time.Sleep(time.Second)
 		cancelRoutines()
-		if !c.s.IsShutdown() {
-			wg.Add(1)
-			defer c.Run(ctx, wg)
-			return
-		}
+		return true, !c.s.IsShutdown()
 	}
-
+	return true, false
 }
 
 // PostStartHookRunner executes a hook command and sets the status to the state
