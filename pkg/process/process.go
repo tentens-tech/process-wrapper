@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"process-wrapper/pkg/lease/handlers"
 	"process-wrapper/pkg/metrics"
 	"strings"
@@ -335,7 +334,7 @@ func (c *Command) Run(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 	startTime := time.Now().UTC()
 	var err error
-	cmd := exec.CommandContext(ctx, c.Entrypoint, c.Args...) // #nosec G204
+	cmd := newSupervisedCmd(ctx, c.Entrypoint, c.Args...)
 	envs := c.MergeEnvs()
 	cmd.Env = c.ConvertEnvs(envs)
 	preStartLogger := log.WithFields(log.Fields{"name": c.Name, "command": c.String()})
@@ -367,12 +366,16 @@ func (c *Command) Run(ctx context.Context, wg *sync.WaitGroup) {
 
 	preStartLogger.Debugf("Schedule command")
 	if err = cmd.Start(); err != nil {
+		if ctx.Err() != nil {
+			preStartLogger.Warnf("Command context was closed before start")
+			return
+		}
 		defer log.Fatalf("Start command error, %v", err)
 		return
 	}
 
 	ctxRoutines, cancelRoutines := context.WithCancel(context.Background())
-	pid := cmd.Process.Pid
+	pid := cmd.Pid()
 	c.s.SetPid(c.Name, pid)
 	c.s.SetCancelRoutine(c.Name, cancelRoutines)
 	postStartLogger := log.WithFields(log.Fields{"name": c.Name, "command": c.String(), "pid": pid})
@@ -383,7 +386,7 @@ func (c *Command) Run(ctx context.Context, wg *sync.WaitGroup) {
 	postStartLogger.Printf("Run command")
 
 	// Run health checks
-	go c.HealthChecker(ctxRoutines, cancelRoutines, pid, envs)
+	go c.HealthChecker(ctxRoutines, cancelRoutines, cmd, envs)
 
 	// Get process cpu/memory stats
 	go c.GetStats(ctxRoutines, pid)
@@ -391,7 +394,7 @@ func (c *Command) Run(ctx context.Context, wg *sync.WaitGroup) {
 	postStartLogger.Debugf("Wait command to complete")
 
 	err = cmd.Wait()
-	terminationLogger := log.WithFields(log.Fields{"name": c.Name, "command": c.String(), "pid": pid, "exit_code": cmd.ProcessState.ExitCode()})
+	terminationLogger := log.WithFields(log.Fields{"name": c.Name, "command": c.String(), "pid": pid, "exit_code": cmd.ExitCode()})
 	if err != nil {
 		terminationLogger.Errorf("Command execution error, %v", err)
 	}
@@ -407,12 +410,12 @@ func (c *Command) Run(ctx context.Context, wg *sync.WaitGroup) {
 		}
 
 	*/
-	metrics.SidecarCmdDurationSecondsGauge.WithLabelValues(c.Name, fmt.Sprintf("%v", cmd.ProcessState.ExitCode())).Set(time.Since(startTime).Seconds())
+	metrics.SidecarCmdDurationSecondsGauge.WithLabelValues(c.Name, fmt.Sprintf("%v", cmd.ExitCode())).Set(time.Since(startTime).Seconds())
 
 	// Do not restart process if command not killed by health checker and graceful shutdown in progress
 	if !c.s.IsKilled(c.Name) && c.s.IsShutdown() {
 		terminationLogger.Printf("Command completed with code %v, time %v",
-			cmd.ProcessState.ExitCode(), time.Since(startTime))
+			cmd.ExitCode(), time.Since(startTime))
 		cancelRoutines()
 		return
 	}
@@ -473,8 +476,8 @@ func (c *Command) SetReadinessFailureThreshold(logger *log.Entry) {
 // If probes are undefined default status is healthy (HTTP 200)
 // If one of the probes is failed global sidecar health status is unhealthy (HTTP 503)
 // Global health state is tracked by *State.statusMap and *State.SetState method
-func (c *Command) HealthChecker(ctxRoutines context.Context, cancelRoutines context.CancelFunc, pid int, envs map[string]string) {
-	logger := log.WithFields(log.Fields{"name": c.Name, "pid": pid})
+func (c *Command) HealthChecker(ctxRoutines context.Context, cancelRoutines context.CancelFunc, run *supervisedCmd, envs map[string]string) {
+	logger := log.WithFields(log.Fields{"name": c.Name, "pid": run.Pid()})
 	logger.Debugf("Start health checker routine")
 	if c.Readiness == nil {
 		logger.Warnf("Readiness probe is not set for the process")
@@ -491,13 +494,37 @@ func (c *Command) HealthChecker(ctxRoutines context.Context, cancelRoutines cont
 	c.s.SetState(c.Name, false)
 
 	time.Sleep(c.Readiness.Delay.Duration)
-	c.ProbeRunner(ctxRoutines, cancelRoutines, logger, pid, envs)
+	c.ProbeRunner(ctxRoutines, cancelRoutines, logger, run, envs)
+}
+
+// stopRun kills the command together with every process it left behind and
+// keeps the shared lock alive until all of them are gone, so another replica
+// cannot take the lock over while any of them still runs.
+func (c *Command) stopRun(run *supervisedCmd) {
+	run.Kill()
+	interval := c.Readiness.Period.Duration
+	if c.Readiness.KeepSharedLock != nil {
+		if ttl, err := time.ParseDuration(c.Readiness.KeepSharedLock.TTLDuration); err == nil && ttl/2 > 0 && ttl/2 < interval {
+			interval = ttl / 2
+		}
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-run.Done():
+			return
+		case <-ticker.C:
+			if c.Readiness.KeepSharedLock != nil {
+				c.Readiness.KeepSharedLock.Run(c.Name)
+			}
+		}
+	}
 }
 
 // ProbeRunner executes probes and collects a process state
-func (c *Command) ProbeRunner(ctx context.Context, cancelRoutines context.CancelFunc, logger *log.Entry, pid int, envs map[string]string) {
+func (c *Command) ProbeRunner(ctx context.Context, cancelRoutines context.CancelFunc, logger *log.Entry, run *supervisedCmd, envs map[string]string) {
 	var (
-		err              error
 		failureThreshold int
 		hookExecuted     bool
 		hookLastState    bool
@@ -587,11 +614,7 @@ func (c *Command) ProbeRunner(ctx context.Context, cancelRoutines context.Cancel
 						})
 						c.s.SetKillState(c.Name, true)
 						cancelRoutines()
-						time.Sleep(time.Second * 2)
-						err = syscall.Kill(pid, syscall.SIGKILL)
-						if err != nil {
-							logger.Warnf("Terminate process failure %v", err)
-						}
+						c.stopRun(run)
 						if c.Readiness.KeepSharedLock != nil {
 							c.s.RemoveState(c.Name)
 						}
@@ -628,10 +651,7 @@ func (c *Command) ProbeRunner(ctx context.Context, cancelRoutines context.Cancel
 						c.s.SetState(c.Name, false)
 						c.s.SetKillState(c.Name, true)
 						cancelRoutines()
-						err = syscall.Kill(pid, syscall.SIGKILL)
-						if err != nil {
-							logger.Warnf("Terminate process failure %v", err)
-						}
+						c.stopRun(run)
 						return
 					}
 				}
