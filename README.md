@@ -177,13 +177,19 @@ Each process starts with a `readiness` probe runner:
 4. a process without `readiness` is healthy as soon as it starts.
 
 A process that exits on its own is restarted immediately (use `floatingPid` to catch crash loops).
+A process that can't be started (missing entrypoint, `dir` or `envsFile`) doesn't stop the wrapper: it is
+marked unhealthy and retried with a backoff from 1s to 30s (`sidecar_cmd_readiness_count{status="start_failure"}`).
 Until the first successful check the process is not ready.
+
+Every process runs in its own process group: stop signals (probe restart, memory limit, shutdown) are sent
+to the whole group, and processes left in the group after the command exits (e.g. shell background jobs)
+are killed. Descendants that create their own session (`setsid`) are not tracked.
 
 | Probe | Fields | Passes when |
 |---|---|---|
 | `http` | `url` | GET returns 2xx within 5s |
 | `tcp` | `socket` (`host:port`) | connection is established within 2s |
-| `exec` | `command` (`entrypoint`, `args`, `envs`, `dir`) | command exits with 0 within 30s; it inherits the wrapper's env |
+| `exec` | `command` (`entrypoint`, `args`, `envs`, `dir`) | command exits with 0 within 30s; it inherits the wrapper's env, runs in the process `dir` (unless set) and with the process `credential` |
 | `file` | `path` | file exists |
 | `env` | `name`, `value` | the wrapper's env `name` equals `value` |
 | `sql` | `envs`, `queries`, `contains` | every query succeeds within 10s and the first column contains the expected values |
@@ -204,6 +210,11 @@ Until the first successful check the process is not ready.
 start if there is no `readiness`). The process becomes ready only after the hook succeeds; if the hook fails
 or exceeds `deadline` (default `30s`), the process is restarted.
 
+A command hook gets the process envs, runs in the process `dir` (unless set) and never with more privileges
+than the process: if the process drops privileges with `sysProcAttr.credential`, the hook (as well as `exec`
+probes) runs with the same credential. Hook output is limited to 64 KiB per stream, a hook that writes more
+is killed and considered failed.
+
 ```yaml
 postStart:
   deadline: "10s"
@@ -218,6 +229,7 @@ postStart:
 ### Logs
 
 stdout/stderr of each process is written by the wrapper as logfmt with `name`, `pid` and `out` labels.
+Lines longer than 64 KiB are logged in parts.
 `logFormat` (or the `LOG_FORMAT` env for all processes):
 
 - empty — lines in logfmt are parsed: `level` becomes the severity and `msg` the message; other lines are logged as info;
@@ -257,6 +269,10 @@ Served on `HEALTH_SOCKET` (default `:8111`).
 | `GET /metrics` | wrapper metrics |
 | `GET /prommerge` | metrics of all `promTarget`s merged, with a `process_name` label added |
 
+Only these endpoints are served: handlers that libraries register globally (e.g. `/debug/vars`,
+`/debug/requests`) are not exposed. The endpoints have no authentication, don't publish the port outside
+the pod.
+
 When all processes are healthy for the first time, the wrapper creates `-readiness-file` (default
 `/tmp/started`) and removes it on shutdown.
 
@@ -281,12 +297,12 @@ from `/proc` and available on Linux only.
 
 | Signal | Behaviour |
 |---|---|
-| `SIGTERM`, `SIGQUIT` | graceful shutdown: readiness switches to 503, the readiness file is removed, all processes get SIGTERM; processes still running after `-graceful-shutdown-deadline` are killed |
+| `SIGTERM`, `SIGQUIT` | graceful shutdown: readiness switches to 503, the readiness file is removed, process groups of all processes get SIGTERM; processes still running after `-graceful-shutdown-deadline` are killed |
 | `SIGINT` | fast shutdown: processes are killed immediately |
 | `SIGUSR1`, `SIGUSR2` | print the state of all processes |
 
-Processes are not restarted during shutdown. Signals are sent to the process pid only: if the entrypoint is a
-shell, use `exec` (or `trap`) so the signal reaches the application, see
+Processes are not restarted during shutdown. Signals are sent to the process group, so with a shell entrypoint
+both the shell and the application get them; use `exec` or `trap` to control the shutdown order, see
 [graceful-termination.yaml](examples/graceful-termination.yaml).
 
 ## Docker

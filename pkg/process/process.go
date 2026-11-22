@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"github.com/go-logfmt/logfmt"
 	log "github.com/sirupsen/logrus"
@@ -20,10 +21,17 @@ import (
 )
 
 const (
-	ProbePeriodSeconds                 = 5
-	ProbeDelaySeconds                  = 5
-	ProbeFailureThreshold              = 3
-	DefaultTerminationGracePeriod      = 10 * time.Second
+	ProbePeriodSeconds            = 5
+	ProbeDelaySeconds             = 5
+	ProbeFailureThreshold         = 3
+	DefaultTerminationGracePeriod = 10 * time.Second
+	// MaxOutputLineBytes bounds how much of one output line of a command is
+	// held in memory, longer lines are logged in parts
+	MaxOutputLineBytes = 64 * 1024
+	// StartRetryMinDelay and StartRetryMaxDelay bound the backoff between
+	// attempts to start a command that fails to start
+	StartRetryMinDelay                 = time.Second
+	StartRetryMaxDelay                 = 30 * time.Second
 	terminationPollInterval            = 100 * time.Millisecond
 	DefaultSharedLockLeaseEndpoint     = "/lease"
 	DefaultSharedLockKeepAliveEndpoint = "/keepalive"
@@ -54,7 +62,9 @@ type Command struct {
 	// TerminationGracePeriod is the time between SIGTERM and SIGKILL when the
 	// process is restarted by a failed probe or postStart hook (default 10s)
 	TerminationGracePeriod Duration `yaml:"terminationGracePeriod"`
-	s                      *State
+	// startBackoff is the current delay between failed start attempts
+	startBackoff time.Duration
+	s            *State
 }
 
 // Probe represents health check
@@ -197,7 +207,7 @@ func (c *Command) String() string {
 	return cmd
 }
 
-func (c *Command) MergeEnvs() map[string]string {
+func (c *Command) MergeEnvs() (map[string]string, error) {
 	var err error
 	envs := make(map[string]string, len(os.Environ())+len(c.Envs))
 	logger := log.WithFields(log.Fields{"name": c.Name})
@@ -223,8 +233,7 @@ func (c *Command) MergeEnvs() map[string]string {
 		var envsFile *os.File
 		envsFile, err = os.Open(c.EnvsFile)
 		if err != nil {
-			logger.Errorf("Cannot read envs file, %v", err)
-			os.Exit(1)
+			return nil, fmt.Errorf("cannot read envs file, %w", err)
 		}
 
 		fileScanner := bufio.NewScanner(envsFile)
@@ -249,7 +258,7 @@ func (c *Command) MergeEnvs() map[string]string {
 		}
 	}
 	logger.Debugf("Merged envs %+v", envs)
-	return envs
+	return envs, nil
 }
 
 // ConvertEnvs converts envs to "key=value" form
@@ -382,11 +391,13 @@ func (c *Command) Run(ctx context.Context, wg *sync.WaitGroup) {
 // runOnce starts the command, waits for it and reports whether it must be restarted
 func (c *Command) runOnce(ctx context.Context) bool {
 	startTime := time.Now().UTC()
-	var err error
 	cmd := exec.CommandContext(ctx, c.Entrypoint, c.Args...) // #nosec G204
-	envs := c.MergeEnvs()
-	cmd.Env = c.ConvertEnvs(envs)
 	preStartLogger := log.WithFields(log.Fields{"name": c.Name, "command": c.String()})
+	envs, err := c.MergeEnvs()
+	if err != nil {
+		return c.startFailed(ctx, preStartLogger, err)
+	}
+	cmd.Env = c.ConvertEnvs(envs)
 	if c.Dir != "" {
 		preStartLogger.Printf("Set custom process dir to %v", c.Dir)
 		cmd.Dir = c.Dir
@@ -395,29 +406,28 @@ func (c *Command) runOnce(ctx context.Context) bool {
 	var stdout, stderr io.ReadCloser
 	stdout, err = cmd.StdoutPipe()
 	if err != nil {
-		preStartLogger.Errorf("Cannot connect command stdout, %v", err)
+		return c.startFailed(ctx, preStartLogger, fmt.Errorf("cannot connect command stdout, %w", err))
 	}
 	defer stdout.Close()
-	stdoutReader := bufio.NewReader(stdout)
+	stdoutReader := bufio.NewReaderSize(stdout, MaxOutputLineBytes)
 	stderr, err = cmd.StderrPipe()
 	if err != nil {
-		preStartLogger.Errorf("Cannot connect command stderr, %v", err)
+		return c.startFailed(ctx, preStartLogger, fmt.Errorf("cannot connect command stderr, %w", err))
 	}
 	defer stderr.Close()
-	stderrReader := bufio.NewReader(stderr)
+	stderrReader := bufio.NewReaderSize(stderr, MaxOutputLineBytes)
 
-	if c.SysProcAttr != nil {
-		log.Printf("Set process attributes")
-		cmd.SysProcAttr = c.SysProcAttr
-	}
+	// Own process group: stop signals reach the descendants of the command too
+	cmd.SysProcAttr = groupProcAttr(c.SysProcAttr)
+	cmd.Cancel = func() error { return SignalGroup(cmd.Process.Pid, syscall.SIGKILL) }
 
 	c.AcquireSharedLock(ctx)
 
 	preStartLogger.Debugf("Schedule command")
 	if err = cmd.Start(); err != nil {
-		defer log.Fatalf("Start command error, %v", err)
-		return false
+		return c.startFailed(ctx, preStartLogger, err)
 	}
+	c.startBackoff = 0
 
 	ctxRoutines, cancelRoutines := context.WithCancel(context.Background())
 	pid := cmd.Process.Pid
@@ -445,6 +455,11 @@ func (c *Command) runOnce(ctx context.Context) bool {
 	}
 
 	terminationLogger.Warnf("Command terminated")
+	// Kill descendants left in the process group (background jobs), so they
+	// don't outlive the command, e.g. after a restart or a lost shared lock
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err == nil {
+		terminationLogger.Warnf("Killed processes left in the command process group")
+	}
 	c.s.RemovePid(c.Name, pid)
 
 	// Todo: Implement different restart policy for processes
@@ -481,7 +496,7 @@ func (c *Command) runOnce(ctx context.Context) bool {
 
 // PostStartHookRunner executes a hook command and sets the status to the state
 func (c *Command) PostStartHookRunner(ctx context.Context, envs map[string]string) bool {
-	s := c.PostStart.Run(ctx, c.Name, envs)
+	s := c.PostStart.Run(ctx, c, envs)
 	switch s {
 	case true:
 		c.s.SetState(c.Name, true)
@@ -579,7 +594,7 @@ func (c *Command) ProbeRunner(ctx context.Context, cancelRoutines context.Cancel
 				status = append(status, s)
 			}
 			if c.Readiness.Exec != nil {
-				s := HealthRun(c.Name, c.Readiness.Exec, c.s.M)
+				s := HealthRun(c.Name, c.Readiness.Exec.For(c), c.s.M)
 				status = append(status, s)
 			}
 			if c.Readiness.SQL != nil {
@@ -686,7 +701,7 @@ func (c *Command) terminateProcess(logger *log.Entry, pid int) {
 	exited := func() bool { return c.s.GetPid(c.Name) != pid }
 
 	logger.Warnf("Send SIGTERM, grace period %v", grace)
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+	if err := SignalGroup(pid, syscall.SIGTERM); err != nil {
 		logger.Warnf("Terminate process failure %v", err)
 	}
 	deadline := time.Now().Add(grace)
@@ -700,9 +715,24 @@ func (c *Command) terminateProcess(logger *log.Entry, pid int) {
 		return
 	}
 	logger.Warnf("Process is still running after %v, send SIGKILL", grace)
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+	if err := SignalGroup(pid, syscall.SIGKILL); err != nil {
 		logger.Warnf("Kill process failure %v", err)
 	}
+}
+
+// startFailed handles a command that can't be started (missing entrypoint,
+// dir or envs file): instead of stopping the wrapper and all other commands,
+// the command is marked unhealthy and retried with an exponential backoff.
+func (c *Command) startFailed(ctx context.Context, logger *log.Entry, err error) bool {
+	logger.Errorf("Start command error, %v", err)
+	metrics.SidecarCmdReadinessCount.WithLabelValues("start_failure", c.Name, c.Entrypoint).Inc()
+	c.s.SetState(c.Name, false)
+	if c.s.IsShutdown() || ctx.Err() != nil {
+		return false
+	}
+	c.startBackoff = min(max(c.startBackoff*2, StartRetryMinDelay), StartRetryMaxDelay)
+	logger.Warnf("Retry command start in %v", c.startBackoff)
+	return sleepCtx(ctx, c.startBackoff) && !c.s.IsShutdown()
 }
 
 // sleepCtx sleeps for d and returns false if ctx is done earlier
@@ -717,73 +747,91 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// ProcessOutput prints commands output output
+// ProcessOutput logs command output line by line. A line longer than
+// MaxOutputLineBytes is logged in several parts, so a process can't make the
+// wrapper buffer an unlimited amount of memory.
 func (c *Command) ProcessOutput(b *bufio.Reader, pid int) {
 	logFormat := os.Getenv("LOG_FORMAT")
 	if c.LogFormat != "" {
 		logFormat = c.LogFormat
 	}
 	for {
-		out, err := b.ReadString('\n')
+		out, err := readOutputLine(b)
+		// Data may come together with an error (last line without a newline)
+		if out != "" {
+			c.logOutputLine(out, logFormat, pid)
+		}
 		if err != nil {
 			log.WithFields(log.Fields{"name": c.Name}).Debugf("Stop process output routine")
 			return
 		}
+	}
+}
 
-		var level, message string
+// readOutputLine returns the next line from b, or the next b.Size() bytes of
+// it when the line doesn't fit into the reader buffer
+func readOutputLine(b *bufio.Reader) (string, error) {
+	line, err := b.ReadSlice('\n')
+	if errors.Is(err, bufio.ErrBufferFull) {
+		err = nil
+	}
+	return string(line), err
+}
 
-		getMessage := func(in string) (string, string) {
-			d := logfmt.NewDecoder(strings.NewReader(out))
-			var l, m string
-			for d.ScanRecord() {
+func (c *Command) logOutputLine(out, logFormat string, pid int) {
+	var level, message string
+
+	getMessage := func(in string) (string, string) {
+		d := logfmt.NewDecoder(strings.NewReader(out))
+		var l, m string
+		for d.ScanRecord() {
+			if d.Err() != nil {
+				log.Errorf("Scan record error, %v", d.Err())
+			}
+			for d.ScanKeyval() {
 				if d.Err() != nil {
-					log.Errorf("Scan record error, %v", d.Err())
+					log.Errorf("Scan key value error, %v", d.Err())
 				}
-				for d.ScanKeyval() {
-					if d.Err() != nil {
-						log.Errorf("Scan key value error, %v", d.Err())
-					}
-					if string(d.Key()) == "level" {
-						l = string(d.Value())
-					}
-					if string(d.Key()) == "msg" {
-						m = string(d.Value())
-					}
+				if string(d.Key()) == "level" {
+					l = string(d.Value())
+				}
+				if string(d.Key()) == "msg" {
+					m = string(d.Value())
 				}
 			}
-			if l == "" {
-				return "unknown", in
-			}
-			return l, m
 		}
-		level, message = getMessage(out)
+		if l == "" {
+			return "unknown", in
+		}
+		return l, m
+	}
+	level, message = getMessage(out)
 
-		if level == "unknown" {
-			switch logFormat {
-			case "free", "plain":
-				fmt.Printf("%v", out)
-			case "auto":
-				if strings.Contains(out, "CRITICAL") || strings.Contains(out, "ERROR") {
-					log.WithFields(log.Fields{"name": c.Name, "pid": pid, "out": "stdout"}).Errorf("%v", out)
-					continue
-				}
-				if strings.Contains(out, "WARNING") {
-					log.WithFields(log.Fields{"name": c.Name, "pid": pid, "out": "stdout"}).Warnf("%v", out)
-					continue
-				}
-				log.WithFields(log.Fields{"name": c.Name, "pid": pid, "out": "stdout"}).Printf("%v", out)
-			default:
-				log.WithFields(log.Fields{"name": c.Name, "pid": pid, "out": "stdout"}).Printf("%v", out)
+	if level == "unknown" {
+		switch logFormat {
+		case "free", "plain":
+			fmt.Printf("%v", out)
+		case "auto":
+			if strings.Contains(out, "CRITICAL") || strings.Contains(out, "ERROR") {
+				log.WithFields(log.Fields{"name": c.Name, "pid": pid, "out": "stdout"}).Errorf("%v", out)
+				return
 			}
-		} else {
-			switch level {
-			case "warning":
-				log.WithFields(log.Fields{"name": c.Name, "pid": pid, "severity": level}).Warnf("%v", message)
-			case "error":
-				log.WithFields(log.Fields{"name": c.Name, "pid": pid, "severity": level}).Errorf("%v", message)
-			default:
-				log.WithFields(log.Fields{"name": c.Name, "pid": pid, "severity": level}).Printf("%v", message)
+			if strings.Contains(out, "WARNING") {
+				log.WithFields(log.Fields{"name": c.Name, "pid": pid, "out": "stdout"}).Warnf("%v", out)
+				return
 			}
+			log.WithFields(log.Fields{"name": c.Name, "pid": pid, "out": "stdout"}).Printf("%v", out)
+		default:
+			log.WithFields(log.Fields{"name": c.Name, "pid": pid, "out": "stdout"}).Printf("%v", out)
+		}
+	} else {
+		switch level {
+		case "warning":
+			log.WithFields(log.Fields{"name": c.Name, "pid": pid, "severity": level}).Warnf("%v", message)
+		case "error":
+			log.WithFields(log.Fields{"name": c.Name, "pid": pid, "severity": level}).Errorf("%v", message)
+		default:
+			log.WithFields(log.Fields{"name": c.Name, "pid": pid, "severity": level}).Printf("%v", message)
 		}
 	}
 }

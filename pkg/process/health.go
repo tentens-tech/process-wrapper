@@ -63,7 +63,18 @@ type State struct {
 	cancelRoutineMap map[string]context.CancelFunc
 	preemptedEvent   chan struct{}
 	M                *metrics.Server
+	mux              *http.ServeMux
+	muxOnce          sync.Once
 	sync.RWMutex
+}
+
+// Mux returns the handlers served on the health socket. It is a dedicated
+// ServeMux instead of http.DefaultServeMux, so handlers that dependencies
+// register globally (expvar /debug/vars, x/net/trace /debug/requests and
+// /debug/events) are not exposed.
+func (s *State) Mux() *http.ServeMux {
+	s.muxOnce.Do(func() { s.mux = http.NewServeMux() })
+	return s.mux
 }
 
 func NewState(readinessFile string, envoyDrain bool) *State {
@@ -480,7 +491,21 @@ func (s *State) HealthEndpoint() {
 	if socket == "" {
 		socket = defaultSocket
 	}
-	http.HandleFunc("/readiness", func(w http.ResponseWriter, r *http.Request) {
+	mux := s.Mux()
+	s.registerHealthHandlers(mux)
+	server := &http.Server{
+		Addr:         socket,
+		Handler:      mux,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	}
+
+	log.Fatalln(server.ListenAndServe())
+}
+
+// registerHealthHandlers registers readiness, liveness and process state endpoints
+func (s *State) registerHealthHandlers(mux *http.ServeMux) {
+	mux.HandleFunc("/readiness", func(w http.ResponseWriter, r *http.Request) {
 		log.Debugf("GET /readiness")
 		if r.URL.Query().Has("wait") {
 			waitHealthy(w, r, s.Readiness)
@@ -492,7 +517,7 @@ func (s *State) HealthEndpoint() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 	})
-	http.HandleFunc("/liveness", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/liveness", func(w http.ResponseWriter, r *http.Request) {
 		log.Debugf("GET /liveness")
 		if r.URL.Query().Has("wait") {
 			waitHealthy(w, r, s.Liveness)
@@ -504,7 +529,7 @@ func (s *State) HealthEndpoint() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 	})
-	http.HandleFunc("/pidof", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/pidof", func(w http.ResponseWriter, r *http.Request) {
 		log.Debugf("GET /pidof")
 		name := r.URL.Query().Get("name")
 		if name == "" {
@@ -523,7 +548,7 @@ func (s *State) HealthEndpoint() {
 			log.Errorf("Failed to write response for /pidof endpoint, %v", err)
 		}
 	})
-	http.HandleFunc("/pids", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/pids", func(w http.ResponseWriter, _ *http.Request) {
 		log.Debugf("GET /pids")
 		pids := s.GetPidsMap()
 		if len(pids) == 0 {
@@ -544,7 +569,7 @@ func (s *State) HealthEndpoint() {
 			log.Errorf("Failed to write response for /pids endpoint, %v", err)
 		}
 	})
-	http.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
 		log.Debugf("GET /status")
 		state := s.ProcessState()
 		if len(state) == 0 {
@@ -559,7 +584,7 @@ func (s *State) HealthEndpoint() {
 		}
 	})
 
-	http.HandleFunc("/heartbeat", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/heartbeat", func(w http.ResponseWriter, r *http.Request) {
 		log.Debugf("%v /heartbeat", r.Method)
 		name := r.URL.Query().Get("name")
 		// Only managed processes may report heartbeats: arbitrary names would grow
@@ -590,14 +615,6 @@ func (s *State) HealthEndpoint() {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
 	})
-	server := &http.Server{
-		Addr:         socket,
-		Handler:      nil, // You can set your handler here
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-	}
-
-	log.Fatalln(server.ListenAndServe())
 }
 
 func (s *State) GetReadyPromTargets(targets []prommerge.Target) []prommerge.Target {
@@ -615,7 +632,7 @@ func (s *State) GetReadyPromTargets(targets []prommerge.Target) []prommerge.Targ
 
 // PromMergeHandler registers /prommerge, which merges metrics of all ready processes
 func (s *State) PromMergeHandler(targets []prommerge.Target, merger *prommerge.Merger) {
-	http.HandleFunc("/prommerge", func(writer http.ResponseWriter, request *http.Request) {
+	s.Mux().HandleFunc("/prommerge", func(writer http.ResponseWriter, request *http.Request) {
 		readyTargets := s.GetReadyPromTargets(targets)
 		if len(readyTargets) == 0 {
 			writer.WriteHeader(http.StatusNoContent)

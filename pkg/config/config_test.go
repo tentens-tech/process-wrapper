@@ -35,7 +35,10 @@ func TestMergeEnvsFromFile(t *testing.T) {
 		t.Fatalf("expected 1 command, got %d", len(commands))
 	}
 
-	envs := commands[0].MergeEnvs()
+	envs, err := commands[0].MergeEnvs()
+	if err != nil {
+		t.Fatalf("MergeEnvs: %v", err)
+	}
 	want := map[string]string{
 		"SERVER":  "1",
 		"FOO":     "bar",

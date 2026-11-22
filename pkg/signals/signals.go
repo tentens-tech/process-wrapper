@@ -62,18 +62,11 @@ func (n *Notifier) Notify() {
 }
 
 func (n *Notifier) TerminateProcess() {
-	var err error
-	var process *os.Process
 	for _, pid := range n.s.GetPids() {
-		process, err = os.FindProcess(pid)
-		if err != nil {
-			log.Warnf("Cannot find procces with pid: %v, %v", pid, err)
-			continue
-		}
 		log.Warnf("Send SIGTERM to %v", pid)
-		err = process.Signal(syscall.SIGTERM)
-		if err != nil {
-			log.Errorf("Cannot terminate the process %v", pid)
+		// The whole process group, so descendants of the command stop too
+		if err := process.SignalGroup(pid, syscall.SIGTERM); err != nil {
+			log.Errorf("Cannot terminate the process %v, %v", pid, err)
 		}
 	}
 	defer n.ProcessKiller()

@@ -56,7 +56,7 @@ func (c *Command) GetStats(ctx context.Context, pid int) {
 			if c.MemoryLimitMB > 0 && memoryUsage/1000000 > c.MemoryLimitMB {
 				log.WithFields(log.Fields{"name": c.Name, "pid": pid}).Warnf("Out of memory %v > %v, killing the process", memoryUsage/1000000, c.MemoryLimitMB)
 				c.s.SetKillState(c.Name, true)
-				err = syscall.Kill(pid, syscall.SIGKILL)
+				err = SignalGroup(pid, syscall.SIGKILL)
 				if err != nil {
 					log.WithFields(log.Fields{"name": c.Name, "pid": pid}).Warnf("Terminate process failure %v", err)
 				}

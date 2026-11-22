@@ -53,7 +53,9 @@ func LeaseController(socket, etcdEndpoints, etcdCaCert, etcdClientCert, etcdClie
 		socket = SOCKET
 	}
 	lock := l.NewLock(etcdEndpoints, etcdCaCert, etcdClientCert, etcdClientKey, sharedLockEtcdTLS)
-	http.HandleFunc("/lease", func(writer http.ResponseWriter, request *http.Request) {
+	// Dedicated mux: don't expose handlers registered globally by dependencies (/debug/*)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/lease", func(writer http.ResponseWriter, request *http.Request) {
 		data := readHTTPBody(request, writer)
 		if data == nil {
 			return
@@ -91,7 +93,7 @@ func LeaseController(socket, etcdEndpoints, etcdCaCert, etcdClientCert, etcdClie
 			log.Errorf("Failed to write response for /lease endpoint, %v", err)
 		}
 	})
-	http.HandleFunc("/keepalive", func(writer http.ResponseWriter, request *http.Request) {
+	mux.HandleFunc("/keepalive", func(writer http.ResponseWriter, request *http.Request) {
 		var err error
 		data := readHTTPBody(request, writer)
 		if data == nil {
@@ -113,14 +115,14 @@ func LeaseController(socket, etcdEndpoints, etcdCaCert, etcdClientCert, etcdClie
 			writer.WriteHeader(http.StatusNoContent)
 		}
 	})
-	http.HandleFunc("/health", func(writer http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/health", func(writer http.ResponseWriter, _ *http.Request) {
 		writer.WriteHeader(http.StatusOK)
 	})
 
 	log.Printf("Start shared-lock server %v", socket)
 	server := &http.Server{
 		Addr:         socket,
-		Handler:      nil, // You can set your handler here
+		Handler:      mux,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 	}
