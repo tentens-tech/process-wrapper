@@ -42,6 +42,9 @@ var ContentType = string(expfmt.NewFormat(expfmt.TypeTextPlain))
 type Target struct {
 	Name string
 	URL  string
+	// Processes gate the target: it is scraped while at least one of them is
+	// ready. Empty means the process named Name.
+	Processes []string
 	// ExtraLabels are added to every series of the target and override labels with the same name.
 	ExtraLabels map[string]string
 }

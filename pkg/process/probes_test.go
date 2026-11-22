@@ -7,7 +7,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"process-wrapper/pkg/prommerge"
+	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -242,5 +245,72 @@ func TestFailedHookRestartsProcessWithoutReadiness(t *testing.T) {
 	}
 	if s.ProcessState()["app"] {
 		t.Error("the process must not be ready")
+	}
+}
+
+// A replica gets every field of the command, except its name and replicas
+func TestReplicaCopiesAllFields(t *testing.T) {
+	c := &Command{
+		Name: "app", Entrypoint: "sh", Args: []string{"-c"}, Envs: map[string]string{"A": "1"},
+		EnvsFile: "/e", RestartPolicy: "Always", LogFormat: "auto", Dir: "/srv", PromTarget: "http://t",
+		SysProcAttr: &syscall.SysProcAttr{Setpgid: true}, Replicas: 2, MemoryLimitMB: 10,
+		TerminationGracePeriod: Duration{time.Second},
+		Readiness:              &Probe{Period: Duration{time.Second}, File: &FileProbe{Path: "/f"}},
+		PostStart:              &Hook{Command: &Command{Entrypoint: "true"}},
+	}
+	s := newTestState()
+	r := c.replica(1, s)
+	if r.Name != "app_1" || r.s != s {
+		t.Errorf("unexpected replica name %v", r.Name)
+	}
+	src, dst := reflect.ValueOf(c).Elem(), reflect.ValueOf(r).Elem()
+	for i := 0; i < src.NumField(); i++ {
+		f := src.Type().Field(i)
+		if !f.IsExported() || f.Name == "Name" || f.Name == "Replicas" {
+			continue
+		}
+		if !reflect.DeepEqual(src.Field(i).Interface(), dst.Field(i).Interface()) {
+			t.Errorf("replica field %v is not copied", f.Name)
+		}
+	}
+	if r.Readiness == c.Readiness || r.PostStart == c.PostStart {
+		t.Error("probes and hooks must not be shared between replicas")
+	}
+}
+
+// readiness without probes: a failed hook restarts the process too
+func TestFailedHookRestartsProcessWithoutProbes(t *testing.T) {
+	s := newTestState()
+	c := &Command{
+		Name: "app", Entrypoint: "sleep", Args: []string{"30"}, s: s,
+		TerminationGracePeriod: Duration{time.Second},
+		Readiness:              &Probe{Delay: Duration{10 * time.Millisecond}},
+		PostStart:              &Hook{Command: &Command{Entrypoint: "false"}},
+	}
+	done := make(chan bool)
+	go func() { done <- c.runOnce(context.Background()) }()
+	select {
+	case restart := <-done:
+		if !restart {
+			t.Error("the process must be restarted")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the process was not stopped after the hook failure")
+	}
+}
+
+func TestReadyPromTargetsOfReplicas(t *testing.T) {
+	s := newTestState()
+	s.SetState("app_0", false)
+	s.SetState("app_1", true)
+	s.SetState("other", false)
+	targets := []prommerge.Target{
+		{Name: "app", Processes: []string{"app_0", "app_1"}},
+		{Name: "other"},
+		{Name: "single", Processes: []string{"x_0"}},
+	}
+	ready := s.GetReadyPromTargets(targets)
+	if len(ready) != 1 || ready[0].Name != "app" {
+		t.Errorf("unexpected ready targets %+v", ready)
 	}
 }

@@ -621,7 +621,15 @@ func (s *State) GetReadyPromTargets(targets []prommerge.Target) []prommerge.Targ
 	var readyTargets []prommerge.Target
 	ps := s.ProcessState()
 	for i := range targets {
-		if ps[targets[i].Name] {
+		processes := targets[i].Processes
+		if len(processes) == 0 {
+			processes = []string{targets[i].Name}
+		}
+		ready := false
+		for _, name := range processes {
+			ready = ready || ps[name]
+		}
+		if ready {
 			readyTargets = append(readyTargets, targets[i])
 			continue
 		}

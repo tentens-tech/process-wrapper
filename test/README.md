@@ -73,7 +73,7 @@ Every field is parsed from YAML and JSON in unit tests (`pkg/config/load_test.go
 | `envs`, `envsFile` | `envs`, `hardening` (missing file) |
 | `dir` | `envs`, `probes` (exec probe), `hooks`, `hardening` (missing dir: unit) |
 | `logFormat` (empty, `auto`, `free`) | `logs`, unit |
-| `replicas` | `termination` |
+| `replicas` (with `postStart`, `promTarget`) | `termination`, unit |
 | `memoryLimitMB` | `memory` |
 | `terminationGracePeriod` | `basic`, unit |
 | `promTarget` | `prommerge`, `lock` |

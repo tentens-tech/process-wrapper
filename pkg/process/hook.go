@@ -52,6 +52,15 @@ type Hook struct {
 	Deadline Duration          `yaml:"deadline"`
 }
 
+// clone returns a copy of the hook for a replica: Run sets the default deadline
+func (h *Hook) clone() *Hook {
+	if h == nil {
+		return nil
+	}
+	c := *h
+	return &c
+}
+
 // Run executes the hook of the supervised command
 func (h *Hook) Run(parent context.Context, supervised *Command, envs map[string]string) bool {
 	if h == nil {

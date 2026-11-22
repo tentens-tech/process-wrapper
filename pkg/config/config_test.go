@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -79,5 +80,9 @@ func TestPromTargets(t *testing.T) {
 	targets := PromTargets(commands)
 	if len(targets) != 1 || targets[0].Name != "a" {
 		t.Fatalf("unexpected targets %+v", targets)
+	}
+	targets = PromTargets([]process.Command{{Name: "r", PromTarget: "http://t", Replicas: 2}})
+	if len(targets) != 1 || !reflect.DeepEqual(targets[0].Processes, []string{"r_0", "r_1"}) {
+		t.Fatalf("replicas must gate their shared target, got %+v", targets)
 	}
 }

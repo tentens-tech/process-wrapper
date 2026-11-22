@@ -302,6 +302,11 @@ suite_termination() {
   check "replicas received SIGTERM" eval '[ $(count_log "msg=\"SIGTERM received") = 3 ]'
   check "replicas finished cleanup" eval '[ $(count_log "msg=\"done") = 3 ]'
   finish
+  start replicas test/e2e/configs/replicas.yaml
+  waitcheck "postStart hook runs for every replica" 15 eval '[ "$(x cat /tmp/replica-hooks | wc -l)" -eq 2 ]'
+  check "replicas ready" eval 'get localhost:8111/status | grep -q "\"rep_0\":true" && get localhost:8111/status | grep -q "\"rep_1\":true"'
+  check "promTarget of replicas merged once" eval '[ $(get localhost:8111/prommerge | grep -c "^go_goroutines{.*process_name=\"rep\"") = 1 ]'
+  finish
 }
 
 suite_signals() {

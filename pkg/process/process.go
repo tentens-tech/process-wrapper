@@ -137,6 +137,33 @@ func (p *Probe) ProbesUndefined() bool {
 }
 
 // NewSchedule starts processes represented in a config
+// replica returns replica r of the command: a copy with its own name and
+// runtime state (probes and hook are copied, not shared)
+func (c *Command) replica(r int, s *State) *Command {
+	return &Command{
+		Name:                   ReplicaName(c.Name, r),
+		Entrypoint:             c.Entrypoint,
+		Args:                   c.Args,
+		Envs:                   c.Envs,
+		EnvsFile:               c.EnvsFile,
+		RestartPolicy:          c.RestartPolicy,
+		Readiness:              c.Readiness.clone(),
+		LogFormat:              c.LogFormat,
+		Dir:                    c.Dir,
+		PromTarget:             c.PromTarget,
+		SysProcAttr:            c.SysProcAttr,
+		PostStart:              c.PostStart.clone(),
+		MemoryLimitMB:          c.MemoryLimitMB,
+		TerminationGracePeriod: c.TerminationGracePeriod,
+		s:                      s,
+	}
+}
+
+// ReplicaName returns the name of replica r of the command
+func ReplicaName(name string, r int) string {
+	return fmt.Sprintf("%v_%v", name, r)
+}
+
 func NewSchedule(ctx context.Context, commands []Command, skipCommands []string, sharedLockURL string, s *State, wg *sync.WaitGroup) {
 	var commandList []string
 	// Get process wrapper cpu/mem metrics
@@ -153,22 +180,7 @@ func NewSchedule(ctx context.Context, commands []Command, skipCommands []string,
 			}
 			if commands[i].Replicas > 0 {
 				for r := 0; r < commands[i].Replicas; r++ {
-					var replicaCommand *Command
-					replicaCommandName := fmt.Sprintf("%v_%v", commands[i].Name, r)
-					replicaCommand = &Command{
-						Name:                   replicaCommandName,
-						Entrypoint:             commands[i].Entrypoint,
-						Args:                   commands[i].Args,
-						Envs:                   commands[i].Envs,
-						EnvsFile:               commands[i].EnvsFile,
-						Readiness:              commands[i].Readiness.clone(),
-						LogFormat:              commands[i].LogFormat,
-						Dir:                    commands[i].Dir,
-						SysProcAttr:            commands[i].SysProcAttr,
-						MemoryLimitMB:          commands[i].MemoryLimitMB,
-						TerminationGracePeriod: commands[i].TerminationGracePeriod,
-						s:                      s,
-					}
+					replicaCommand := commands[i].replica(r, s)
 					log.Debugf("Process replica command %+v", replicaCommand)
 					commandList = append(commandList, replicaCommand.Name)
 					// Not ready until probes pass, so /readiness doesn't report 200 before start
@@ -630,7 +642,10 @@ func (c *Command) ProbeRunner(ctx context.Context, cancelRoutines context.Cancel
 			}
 			if c.Readiness.ProbesUndefined() {
 				// Run PostStart hooks
-				_ = c.PostStartHookRunner(ctx, envs)
+				if !c.PostStartHookRunner(ctx, envs) && ctx.Err() == nil {
+					logger.Errorf("PostStart execution failure")
+					c.killProcess(cancelRoutines, logger, pid)
+				}
 				return
 			}
 
