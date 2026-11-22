@@ -1,21 +1,19 @@
-- name: "prommerge"
+# /prommerge scrapes `promTarget` of every READY process and returns all
+# metrics in one response with an extra label process_name="<name>".
+# Here both processes point to process-wrapper's own /metrics for simplicity.
+#
+#   go run . -config examples/prommerge.yaml
+#   curl -s localhost:8111/prommerge | grep 'process_name="app-1"' | head
+- name: "app-1"
   entrypoint: "sleep"
-  #promTarget: "http://localhost:10000/metrics1"
-  args:
-    - "2000"
-- name: "prommerge2"
+  args: ["3600"]
+  promTarget: "http://localhost:8111/metrics"
+- name: "app-2"
   entrypoint: "sleep"
-  #promTarget: "http://localhost:10000/metrics2"
-  args:
-    - "2000"
-- name: "prommerge3"
-  entrypoint: "sleep"
-  #promTarget: "http://localhost:10000/metrics3"
-  args:
-    - "2000"
+  args: ["3600"]
+  promTarget: "http://localhost:8111/metrics"
   readiness:
     delay: "1s"
-    period: "1s"
-    failureThreshold: 3
-    file:
-      path: "111"
+    period: "2s"
+    tcp:
+      socket: "localhost:8111"

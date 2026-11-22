@@ -1,10 +1,13 @@
-- name: "termination-delay"
-  replicas: 3
-  entrypoint: "./term-delay"
+# Graceful shutdown: on SIGTERM/SIGQUIT process-wrapper marks itself not ready,
+# removes the readiness file, sends SIGTERM to all processes and sends SIGKILL
+# after -graceful-shutdown-deadline (default 10s). SIGINT stops immediately,
+# SIGUSR1/SIGUSR2 print the processes state.
+#
+#   go run . -config examples/graceful-termination.yaml -graceful-shutdown-deadline=15s &
+#   kill -TERM <process-wrapper pid>
+- name: "term-delay"
+  replicas: 3                   # term-delay_0, term-delay_1, term-delay_2
+  entrypoint: "sh"
   args:
-    - "-delay=8s"
-
-
-
-
-
+    - "-c"
+    - "trap 'echo SIGTERM received, cleaning up; sleep 5; echo done; exit 0' TERM; while true; do sleep 1; done"

@@ -1,0 +1,14 @@
+# Process environment = process-wrapper env + envs + envsFile (later wins).
+# envsFile uses KEY=value lines, quotes around values are removed.
+# A missing envsFile is a fatal error.
+#
+#   go run . -config examples/envs-file.yaml
+- name: "printenv"
+  envsFile: "examples/envs-file.env"
+  entrypoint: "sh"
+  args:
+    - "-c"
+    - "echo \"FROM_CONFIG=$FROM_CONFIG FROM_FILE=$FROM_FILE OVERRIDDEN=$OVERRIDDEN\"; exec sleep 3600"
+  envs:
+    FROM_CONFIG: "config"
+    OVERRIDDEN: "config"

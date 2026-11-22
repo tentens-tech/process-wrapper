@@ -1,10 +1,19 @@
-- name: "sleep1"
+# Shared lock: only one process with the same name runs across all pods that
+# use the same shared-lock server; the others wait for the lease. The lease is
+# kept alive by the `lock` probe and released when the process stops.
+# A waiting instance is excluded from /readiness (stays 200) and /status.
+#
+#   docker run -d --name etcd -p 2379:2379 gcr.io/etcd-development/etcd:v3.6.6 \
+#     etcd --listen-client-urls=http://0.0.0.0:2379 --advertise-client-urls=http://localhost:2379
+#   SHARED_LEASE_ETCD_ENDPOINTS=localhost:2379 go run . -shared-lock &          # lock server on :8191
+#   go run . -config examples/shared-lock.yaml -shared-lock-url=http://localhost:8191
+#   HEALTH_SOCKET=:8112 go run . -config examples/shared-lock.yaml   # second instance waits
+- name: "singleton"
   entrypoint: "sleep"
-  args:
-    - "200000"
+  args: ["3600"]
   readiness:
     delay: "1s"
     period: "1s"
     failureThreshold: 3
     lock:
-      ttlDuration: "1s"
+      ttlDuration: "3s"         # lease TTL, must be greater than period (default 2s)

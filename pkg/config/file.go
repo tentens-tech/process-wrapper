@@ -20,15 +20,14 @@ type File struct {
 func (cf File) Load() []process.Command {
 	cf.Env = make(map[string]string)
 	for _, envs := range os.Environ() {
-		kv := strings.Split(envs, "=")
-		if len(kv) == 2 {
-			if strings.Contains(kv[0], EnvPrefix) {
-				cf.Env[kv[0]] = kv[1]
-			}
+		k, v, ok := strings.Cut(envs, "=")
+		if ok && strings.Contains(k, EnvPrefix) {
+			cf.Env[k] = v
 		}
 	}
-	for k, v := range cf.Env {
-		log.Printf("%v: %v", k, v)
+	// Log only variable names: values may contain secrets
+	for k := range cf.Env {
+		log.Printf("Found env %v", k)
 	}
 
 	log.Printf("Load config %v", cf.Path)
@@ -36,7 +35,7 @@ func (cf File) Load() []process.Command {
 		err    error
 		config []byte
 	)
-	config, err = os.ReadFile(cf.Path)
+	config, err = os.ReadFile(cf.Path) // #nosec G304 -- config path is provided by the operator
 	if err != nil {
 		log.Errorf("Cannot read config file %v, %v", cf.Path, err)
 	}

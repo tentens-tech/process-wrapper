@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"github.com/grafana/pyroscope-go"
 	log "github.com/sirupsen/logrus"
-	"github.com/username1366/prommerge"
 	"net/http"
 	"os"
 	"process-wrapper/pkg/config"
@@ -14,19 +13,24 @@ import (
 	"process-wrapper/pkg/lease/lock"
 	"process-wrapper/pkg/metrics"
 	"process-wrapper/pkg/process"
+	"process-wrapper/pkg/prommerge"
 	"process-wrapper/pkg/signals"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	ConfigEnv               = "CONFIG"
-	ReadinessFile           = "/tmp/started"
-	WaitDeadlineSeconds     = 120
-	GracefulShutdownSeconds = 10
-	DefaultSharedLockURL    = "http://localhost:8191"
+	ConfigEnv     = "CONFIG"
+	ReadinessFile = "/tmp/started"
+	PidFile       = "pid"
+
+	deprecatedSuppressErrorsFlag = "prommerge-supress-errors" //nolint:misspell // legacy flag name
+	WaitDeadlineSeconds          = 120
+	GracefulShutdownSeconds      = 10
+	DefaultSharedLockURL         = "http://localhost:8191"
 )
 
 var (
@@ -34,6 +38,7 @@ var (
 	configPath               string
 	skipCommands             string
 	readinessFile            string
+	pidFile                  string
 	pyroscopeURL             string
 	sharedLockURL            string
 	debug                    bool
@@ -46,7 +51,7 @@ var (
 	promMergeAsync           bool
 	promMergeSort            bool
 	promMergeOmitMeta        bool
-	promMergeSupressErrors   bool
+	promMergeSuppressErrors  bool
 	waitDeadline             time.Duration
 	gracefulShutdownDeadline time.Duration
 )
@@ -54,7 +59,6 @@ var (
 func printEnv() {
 	fmt.Fprintf(flag.CommandLine.Output(), "Usage of %s:\n", os.Args[0])
 	flag.PrintDefaults() // Print default help
-	fmt.Println(lock.DefaultClientCertPath)
 	envs := `
 Environment Variables:
   CONFIG: process-wrapper configuration in JSON format
@@ -75,7 +79,7 @@ Environment Variables:
   SHARED_LEASE_ETCD_CA_CERT: path to CA certificate, (default "%v")
   SHARED_LEASE_ETCD_CLIENT_CERT: path to client certificate, (default "%v")
   SHARED_LEASE_ETCD_CLIENT_KEY: path to client key, (default "%v")
-  AMQP_PROBE_RABBITMQ_DSN_TEMPLATE: amqp probe dsn template, e.g. 'amqp://%%v:%%v@localhost:5673'
+  AMQP_PROBE_RABBITMQ_DSN_TEMPLATE: amqp probe dsn template, e.g. 'amqp://%%v:%%v@localhost:5672'
   AMQP_PROBE_RABBITMQ_USER: amqp probe user 'guest'
   AMQP_PROBE_RABBITMQ_PASS: amqp probe password, e.g. 'guest'
 
@@ -88,6 +92,7 @@ func initFlags() {
 	flag.StringVar(&configPath, "config", "", "config file path")
 	flag.StringVar(&skipCommands, "skip-commands", "", "comma-separated list of ignored commands")
 	flag.StringVar(&readinessFile, "readiness-file", ReadinessFile, "readiness file path")
+	flag.StringVar(&pidFile, "pid-file", PidFile, "pid file path, written when process-wrapper is not PID 1 (empty disables it)")
 	flag.StringVar(&pyroscopeURL, "pyroscope-url", "", "pyroscope profiler address, e.g. http://localhost:4040")
 	flag.StringVar(&sharedLockURL, "shared-lock-url", DefaultSharedLockURL, "shared-lock server url, e.g. http://localhost:8191")
 	flag.BoolVar(&debug, "debug", false, "enable debug")
@@ -96,11 +101,13 @@ func initFlags() {
 	flag.BoolVar(&sharedLockEtcdTLS, "shared-lock-etcd-tls", false, "use tls transport for etcd")
 	flag.BoolVar(&printVersion, "version", false, "prints version")
 	flag.BoolVar(&envoyDrain, "envoy-drain", false, "drain envoy listeners in case of preemption")
-	flag.BoolVar(&promMergeEmptyOnFailure, "prommerge-empty-on-failure", false, "return empty metric list if on of the target is failed")
+	flag.BoolVar(&promMergeEmptyOnFailure, "prommerge-empty-on-failure", false, "return empty metric list if one of the targets failed")
 	flag.BoolVar(&promMergeAsync, "prommerge-async", true, "collect all prometheus targets concurrently")
-	flag.BoolVar(&promMergeSort, "prommerge-sort", true, "disable prommerge result sorting")
-	flag.BoolVar(&promMergeOmitMeta, "prommerge-omit-meta", false, "disable prometheus metadata collection (HELP, TYPE strings)")
-	flag.BoolVar(&promMergeSupressErrors, "prommerge-supress-errors", false, "do not print module errors")
+	flag.BoolVar(&promMergeSort, "prommerge-sort", true, "sort merged series by labels")
+	flag.BoolVar(&promMergeOmitMeta, "prommerge-omit-meta", false, "omit HELP strings from merged metrics")
+	flag.BoolVar(&promMergeSuppressErrors, "prommerge-suppress-errors", false, "do not log prometheus target errors")
+	// Misspelled legacy name, kept for backward compatibility
+	flag.BoolVar(&promMergeSuppressErrors, deprecatedSuppressErrorsFlag, false, "deprecated, use -prommerge-suppress-errors") //nolint:misspell // legacy flag name
 	flag.DurationVar(&waitDeadline, "wait-deadline", time.Second*WaitDeadlineSeconds, "wait deadline duration")
 	flag.DurationVar(&gracefulShutdownDeadline, "graceful-shutdown-deadline", time.Second*GracefulShutdownSeconds, "time between SIGTERM/SIGQUIT and SIGKILL")
 	flag.Parse()
@@ -108,6 +115,11 @@ func initFlags() {
 	if debug {
 		log.SetLevel(log.DebugLevel)
 	}
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == deprecatedSuppressErrorsFlag {
+			log.Warnf("Flag -%v is deprecated, use -prommerge-suppress-errors", deprecatedSuppressErrorsFlag)
+		}
+	})
 }
 
 func Pyroscope() {
@@ -211,17 +223,18 @@ func StartProcessWrapper() {
 	pid := os.Getpid()
 	if pid != 1 {
 		log.WithFields(log.Fields{"name": "main", "pid": pid}).Warnf("Main process pid is not 1, signal notifier may work unproperly")
-		err := os.WriteFile("pid", []byte(fmt.Sprintf("%v", pid)), 0600)
-		if err != nil {
-			log.Errorf("Failed to create pid file, %v", err)
+		if pidFile != "" {
+			if err := os.WriteFile(pidFile, []byte(strconv.Itoa(pid)), 0o600); err != nil {
+				log.Warnf("Failed to create pid file %v, %v", pidFile, err)
+			}
 		}
 	}
 	state := process.NewState(readinessFile, envoyDrain)
 	ctx, cancel := context.WithCancel(context.Background())
 	n := signals.NewNotifier(cancel, gracefulShutdownDeadline, state)
 	go n.Notify()
-	podStatus := process.NewPodStatus(cancel)
-	go podStatus.ReadStatusController()
+	// NewPodStatus starts the pod status controller itself
+	_ = process.NewPodStatus(cancel)
 
 	var cfg config.Config
 	if configPath != "" {
@@ -231,15 +244,15 @@ func StartProcessWrapper() {
 	}
 
 	commands := cfg.Load()
-	PrintConfigJson(config.ToJSON(commands))
+	PrintConfigJSON(config.ToJSON(commands))
 	go metrics.PrometheusHandler()
 
-	opts := prommerge.PromDataOpts{
+	merger := prommerge.New(prommerge.Options{
 		EmptyOnFailure: promMergeEmptyOnFailure,
 		Async:          promMergeAsync,
 		Sort:           promMergeSort,
 		OmitMeta:       promMergeOmitMeta,
-		SupressErrors:  promMergeSupressErrors,
+		SuppressErrors: promMergeSuppressErrors,
 		HTTPClient: &http.Client{
 			Timeout: time.Second * 30, // Set a total timeout for the request
 			Transport: &http.Transport{
@@ -249,8 +262,8 @@ func StartProcessWrapper() {
 				MaxIdleConnsPerHost: 200,
 			},
 		},
-	}
-	go state.PromMergeHandler(config.PromTargets(commands), opts)
+	})
+	go state.PromMergeHandler(config.PromTargets(commands), merger)
 
 	wg := sync.WaitGroup{}
 	go process.NewSchedule(ctx, commands, strings.Split(skipCommands, ","), sharedLockURL, state, &wg)
@@ -259,7 +272,7 @@ func StartProcessWrapper() {
 	log.Printf("All commands are completed")
 }
 
-func PrintConfigJson(data []byte, err error) {
+func PrintConfigJSON(data []byte, err error) {
 	if err != nil {
 		log.Errorf("Failed to print CONFIG JSON, %v", err)
 		return

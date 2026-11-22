@@ -1,18 +1,24 @@
 package process
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+	"strings"
+	"time"
+
 	_ "github.com/go-sql-driver/mysql" // init
 	log "github.com/sirupsen/logrus"
-	"strings"
 )
+
+const SQLProbeTimeout = 10 * time.Second
 
 type SQLProbe struct {
 	Queries  []string `yaml:"queries"`
 	Contains []string `yaml:"contains"`
 	Envs     map[string]string
 	db       *sql.DB
+	dsn      string
 }
 
 func (p *SQLProbe) String() string {
@@ -20,47 +26,52 @@ func (p *SQLProbe) String() string {
 	return fmt.Sprintf("SQL contains %v", c)
 }
 
+// NewDBConnect returns a cached connection pool, recreating it if the DSN changed
 func (p *SQLProbe) NewDBConnect(dsn string) (*sql.DB, error) {
-	var err error
-	if p.db == nil {
-		log.Printf("Create db connection")
-		p.db, err = sql.Open("mysql", dsn)
-		if err != nil {
-			log.Errorln(err)
-			return nil, err
-		}
+	if p.db != nil && p.dsn == dsn {
+		return p.db, nil
 	}
-	return p.db, nil
+	if p.db != nil {
+		_ = p.db.Close()
+		p.db = nil
+	}
+	log.Printf("Create db connection")
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return nil, err
+	}
+	// A probe needs a single connection; don't keep it forever
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(5 * time.Minute)
+	p.db, p.dsn = db, dsn
+	return db, nil
 }
 
 func (p *SQLProbe) Run(name string) bool {
-	var err error
-	var db *sql.DB
-
 	logger := log.WithFields(log.Fields{"name": name})
-	logger.Debugf("MySQL probe envs: %+v", p.Envs)
 
-	dsn, ok := p.Envs["MYSQL_DSN"]
-	if !ok || dsn == "" {
+	dsn := p.Envs["MYSQL_DSN"]
+	if dsn == "" {
 		logger.Errorf("MYSQL_DSN isn't set")
 		return false
 	}
-	db, err = p.NewDBConnect(dsn)
+	db, err := p.NewDBConnect(dsn)
 	if err != nil {
 		logger.Errorf("Cannot connect to db, %v", err)
 		return false
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), SQLProbeTimeout)
+	defer cancel()
 	for _, query := range p.Queries {
-		var responseList []string
-		var r bool
-		responseList, err = p.SQLQuery(db, query, logger)
+		responseList, err := p.SQLQuery(ctx, db, query)
 		if err != nil {
-			logger.Errorf("SQL query error, %v", err)
+			logger.Errorf("SQL probe query error, %v", err)
+			return false
 		}
 		for _, e := range p.Contains {
-			r = sliceContains(responseList, e)
-			if !r {
+			if !sliceContains(responseList, e) {
 				logger.Errorf("DB: %v not ready", e)
 				return false
 			}
@@ -69,23 +80,21 @@ func (p *SQLProbe) Run(name string) bool {
 	return true
 }
 
-func (p *SQLProbe) SQLQuery(db *sql.DB, query string, logger *log.Entry) ([]string, error) {
-	var err error
-	var results *sql.Rows
-	var list []string
-	results, err = db.Query(query)
+// SQLQuery returns the first column of every row
+func (p *SQLProbe) SQLQuery(ctx context.Context, db *sql.DB, query string) ([]string, error) {
+	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
-		logger.Errorf("Cannot execute sql probe query")
-		return nil, err
+		return nil, fmt.Errorf("cannot execute sql probe query: %w", err)
 	}
-	for results.Next() {
-		var r string
-		err = results.Scan(&r)
-		if err != nil {
-			logger.Errorf("Cannot scan sql probe results, %v", err)
-			return nil, err
+	defer rows.Close()
+
+	var list []string
+	for rows.Next() {
+		var r sql.NullString
+		if err = rows.Scan(&r); err != nil {
+			return nil, fmt.Errorf("cannot scan sql probe results: %w", err)
 		}
-		list = append(list, r)
+		list = append(list, r.String)
 	}
-	return list, nil
+	return list, rows.Err()
 }

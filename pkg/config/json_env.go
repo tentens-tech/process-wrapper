@@ -22,11 +22,11 @@ func (c JSONEnv) Load() []process.Command {
 	if configJSONString == "" {
 		log.Errorf("Cannot load json config from %v env", ConfigEnv)
 	}
-	log.Printf("Loaded commands form json env: %v", configJSONString)
 	err = json.Unmarshal([]byte(configJSONString), &commands)
 	if err != nil {
 		log.Errorf("Unmarshal json env config error, %v", err)
 	}
-	log.Debugf("Loaded %v commands from json env config: \n\n %+v \n\n", len(commands), commands)
+	// Don't log the config itself: it may contain secrets in envs
+	log.Printf("Loaded %v commands from %v env", len(commands), ConfigEnv)
 	return commands
 }

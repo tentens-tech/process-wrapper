@@ -21,7 +21,9 @@ func (p TCPProbe) Run(name string) bool {
 		log.WithFields(log.Fields{"name": name, "socket": p.Socket}).Errorf("TCP probe failure, %v", err)
 		return false
 	}
-	conn.Close()
+	if err = conn.Close(); err != nil {
+		log.WithFields(log.Fields{"name": name, "socket": p.Socket}).Debugf("TCP probe close error, %v", err)
+	}
 	log.WithFields(log.Fields{"name": name, "socket": p.Socket}).Debugf("TCP probe success")
 	return true
 }

@@ -1,13 +1,12 @@
-- name: "prommerge"
+# Shared lock + prommerge: metrics are merged only while the process holds the
+# lock and is ready. See shared-lock.yaml for how to start the lock server.
+- name: "singleton"
   entrypoint: "sleep"
-  promTarget: "http://localhost:10000/metrics1"
-  args:
-    - "2000"
+  args: ["3600"]
+  promTarget: "http://localhost:8111/metrics"
   readiness:
     delay: "1s"
     period: "1s"
     failureThreshold: 3
     lock:
-      ttlDuration: "1s"
-    file:
-      path: "111"
+      ttlDuration: "3s"

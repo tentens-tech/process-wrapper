@@ -2,9 +2,8 @@ package config
 
 import (
 	"encoding/json"
-	"fmt"
-	"github.com/username1366/prommerge"
 	"process-wrapper/pkg/process"
+	"process-wrapper/pkg/prommerge"
 )
 
 type Config interface {
@@ -19,16 +18,14 @@ func ToJSON(commands []process.Command) ([]byte, error) {
 	return data, err
 }
 
-func PromTargets(commands []process.Command) []prommerge.PromTarget {
-	var targets []prommerge.PromTarget
-	for i, _ := range commands {
+func PromTargets(commands []process.Command) []prommerge.Target {
+	var targets []prommerge.Target
+	for i := range commands {
 		if commands[i].PromTarget != "" {
-			targets = append(targets, prommerge.PromTarget{
-				Name: commands[i].Name,
-				Url:  commands[i].PromTarget,
-				ExtraLabels: []string{
-					fmt.Sprintf("process_name=%v", commands[i].Name),
-				},
+			targets = append(targets, prommerge.Target{
+				Name:        commands[i].Name,
+				URL:         commands[i].PromTarget,
+				ExtraLabels: map[string]string{"process_name": commands[i].Name},
 			})
 		}
 	}

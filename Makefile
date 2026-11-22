@@ -4,13 +4,19 @@ VERSION := 0.9.22-test
 GIT_COMMIT := $(shell git rev-list -1 HEAD)
 
 .DEFAULT_GOAL := build
-.PHONY: help lint-prepare lint unittest clean install build run stop
+.PHONY: help lint vuln sec test clean build build-version docker-build
 
 version: ## Show version
 	@echo $(VERSION) \(git commit: $(GIT_COMMIT)\)
 
 lint: # Run linters
 	golangci-lint run --color always ./...
+
+vuln: ## Check dependencies and stdlib for known vulnerabilities
+	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+sec: ## Run gosec static security analysis
+	go run github.com/securego/gosec/v2/cmd/gosec@latest ./...
 
 test: ## Run only quick tests
 	go test -short  ./...

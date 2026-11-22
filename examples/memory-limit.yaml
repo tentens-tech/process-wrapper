@@ -1,9 +1,12 @@
-# docker run -it --name mem-leak --rm -v `pwd`:/app golang:1.22 bash
-# cd /app
-# go build -o mem-leak cmd/mem-leak/main.go
-# NODE_NAME=gke HOSTNAME=docker HANDLE_PREEMPTION=false go run -race main.go -config=examples/memory-limit.yaml -debug
+# memoryLimitMB kills and restarts the process when its RSS exceeds the limit
+# (1MB = 1,000,000 bytes). Process stats are collected every 10s and on Linux
+# only, so run it in a container:
+#
+#   docker run --rm -v "$PWD":/app -w /app golang:1.26 \
+#     sh -c 'apt-get update -qq && apt-get install -y -qq python3 >/dev/null && go run . -config examples/memory-limit.yaml'
 - name: "oom"
-  entrypoint: "./mem-leak"
+  entrypoint: "python3"
   args:
-    - "-iterations=20000000" # ~470MB memory usage
+    - "-c"
+    - "import time; data = bytearray(300 * 1000 * 1000); time.sleep(3600)"   # ~300MB
   memoryLimitMB: 100

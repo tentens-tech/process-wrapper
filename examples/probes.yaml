@@ -1,0 +1,25 @@
+# HTTP server checked by several probe types at once. A process is ready only
+# when ALL of its probes pass.
+#
+#   PROBE_ENV=enabled go run . -config examples/probes.yaml
+#   curl -i localhost:8111/status
+- name: "web"
+  entrypoint: "python3"
+  args: ["-m", "http.server", "8080", "--bind", "127.0.0.1"]
+  readiness:
+    delay: "1s"
+    period: "2s"
+    failureThreshold: 3
+    http:                       # 2xx response, 5s timeout
+      url: "http://127.0.0.1:8080/"
+    tcp:                        # TCP connect, 2s timeout
+      socket: "127.0.0.1:8080"
+    exec:                       # exit code 0, 30s timeout; inherits the wrapper env + envs
+      command:
+        entrypoint: "sh"
+        args: ["-c", "test \"$EXPECTED\" = ok"]
+        envs:
+          EXPECTED: "ok"
+    env:                        # compares an env variable of process-wrapper itself (not of the process)
+      name: "PROBE_ENV"
+      value: "enabled"

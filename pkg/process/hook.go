@@ -70,7 +70,7 @@ func (h *SQLHook) RunHook(ctx context.Context, name string, envs map[string]stri
 	defer db.Close()
 
 	for _, query := range h.Queries {
-		_, err = db.QueryContext(ctx, query)
+		_, err = db.ExecContext(ctx, query)
 		if err != nil {
 			log.Errorf("Cannot execute sql hook query: %v, %v", query, err)
 			return false

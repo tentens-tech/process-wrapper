@@ -2,8 +2,8 @@ package process
 
 import (
 	"fmt"
+	amqp "github.com/rabbitmq/amqp091-go"
 	log "github.com/sirupsen/logrus"
-	"github.com/streadway/amqp"
 )
 
 const (
@@ -17,9 +17,7 @@ type AMQPProbe struct {
 	Value      string            `yaml:"value"`
 	Envs       map[string]string `yaml:"envs"`
 	ReuseConn  bool              `yaml:"reuseConn"`
-	dsn        string
 	connection *amqp.Connection
-	logger     *log.Entry
 }
 
 func (p *AMQPProbe) String() string {
@@ -37,11 +35,11 @@ func (p *AMQPProbe) Run(name string) bool {
 			logger.Warnf("Reset amqp probe connection")
 			return false
 		}
-		logger.Warnf("Reuse amqp probe connection")
+		logger.Debugf("Reuse amqp probe connection")
 		return true
 	}
 
-	dsn, ok := p.DSN()
+	dsn, ok := p.DSN(logger)
 	if !ok {
 		return false
 	}
@@ -65,7 +63,7 @@ func (p *AMQPProbe) Run(name string) bool {
 	return true
 }
 
-func (p *AMQPProbe) DSN() (string, bool) {
+func (p *AMQPProbe) DSN(logger *log.Entry) (string, bool) {
 	var (
 		ok                           bool
 		dsn, dsnTemplate, user, pass string
@@ -73,19 +71,19 @@ func (p *AMQPProbe) DSN() (string, bool) {
 
 	dsnTemplate, ok = p.Envs[AMQPProbeDsnTemplateEnvName]
 	if !ok {
-		p.logger.Errorf("Failed to get %v env", AMQPProbeDsnTemplateEnvName)
+		logger.Errorf("Failed to get %v env", AMQPProbeDsnTemplateEnvName)
 		return "", false
 	}
 
 	user, ok = p.Envs[AMQPProbeRabbitMqUserEnvName]
 	if !ok {
-		p.logger.Errorf("Failed to get %v env", AMQPProbeRabbitMqUserEnvName)
+		logger.Errorf("Failed to get %v env", AMQPProbeRabbitMqUserEnvName)
 		return "", false
 	}
 
 	pass, ok = p.Envs[AMQPProbeRabbitMqPassEnvName]
 	if !ok {
-		p.logger.Errorf("Failed to get %v env", AMQPProbeRabbitMqPassEnvName)
+		logger.Errorf("Failed to get %v env", AMQPProbeRabbitMqPassEnvName)
 		return "", false
 	}
 	dsn = fmt.Sprintf(dsnTemplate, user, pass)

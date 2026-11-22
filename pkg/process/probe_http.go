@@ -5,7 +5,12 @@ import (
 	log "github.com/sirupsen/logrus"
 	"io"
 	"net/http"
+	"time"
 )
+
+const HTTPProbeTimeoutSeconds = 5
+
+var httpProbeClient = &http.Client{Timeout: time.Second * HTTPProbeTimeoutSeconds}
 
 type HTTPProbe struct {
 	URL string `yaml:"url"`
@@ -16,7 +21,7 @@ func (p HTTPProbe) String() string {
 }
 
 func (p HTTPProbe) Run(name string) bool {
-	resp, err := http.Get(p.URL)
+	resp, err := httpProbeClient.Get(p.URL)
 	if err != nil {
 		log.WithFields(log.Fields{"name": name, "url": p.URL}).Errorf("HTTP probe failure, %v", err)
 		return false
@@ -26,9 +31,9 @@ func (p HTTPProbe) Run(name string) bool {
 		if err != nil {
 			log.WithFields(log.Fields{"name": name, "url": p.URL}).Errorf("Discard response body error, %v", err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}()
-	if resp.StatusCode < 299 {
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		log.WithFields(log.Fields{"name": name, "url": p.URL}).Debugf("HTTP probe success")
 		return true
 	}
