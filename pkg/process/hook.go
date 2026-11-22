@@ -65,6 +65,7 @@ func (h *Hook) Run(parent context.Context, supervised *Command, envs map[string]
 	}
 	ctx, cancel := context.WithDeadline(parent, time.Now().Add(h.Deadline.Duration))
 	defer cancel()
+	envs = overlayEnvs(envs, h.Envs)
 	if h.SQL != nil {
 		log.WithFields(log.Fields{"name": name}).Printf("Run sql hook")
 		s := h.SQL.RunHook(ctx, name, envs)
@@ -113,6 +114,21 @@ func (h *SQLHook) RunHook(ctx context.Context, name string, envs map[string]stri
 	return true
 }
 
+// overlayEnvs returns a copy of envs with extra applied on top
+func overlayEnvs(envs, extra map[string]string) map[string]string {
+	if len(extra) == 0 {
+		return envs
+	}
+	merged := make(map[string]string, len(envs)+len(extra))
+	for k, v := range envs {
+		merged[k] = v
+	}
+	for k, v := range extra {
+		merged[k] = v
+	}
+	return merged
+}
+
 func validateArgs(args []string) []string {
 	var validated []string
 	for i := 0; i < len(args); i++ {
@@ -137,7 +153,7 @@ func (c *Command) RunHook(ctx context.Context, supervised *Command, envs map[str
 	args := validateArgs(c.Args)
 	cmd := exec.CommandContext(ctx, c.Entrypoint, args...) // #nosec G204
 	cmd.Env = []string{}
-	for k, v := range envs {
+	for k, v := range overlayEnvs(envs, c.Envs) {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%v=%v", k, v))
 	}
 	cmd.Dir = supervised.Dir

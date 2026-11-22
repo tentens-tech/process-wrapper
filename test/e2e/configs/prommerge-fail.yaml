@@ -1,0 +1,8 @@
+- name: "app-ok"
+  entrypoint: "sleep"
+  args: ["3600"]
+  promTarget: "http://127.0.0.1:8111/metrics"
+- name: "app-down"
+  entrypoint: "sleep"
+  args: ["3600"]
+  promTarget: "http://127.0.0.1:1/metrics"

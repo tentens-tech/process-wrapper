@@ -1,0 +1,30 @@
+# Every probe type failing on its own, /status must report each process as false
+- name: "http-fail"
+  entrypoint: "sleep"
+  args: ["3600"]
+  readiness: {delay: "1s", period: "1s", failureThreshold: 1000, http: {url: "http://127.0.0.1:1/"}}
+- name: "http-500"
+  entrypoint: "sleep"
+  args: ["3600"]
+  readiness: {delay: "1s", period: "1s", failureThreshold: 1000, http: {url: "http://127.0.0.1:8111/nope"}}
+- name: "tcp-fail"
+  entrypoint: "sleep"
+  args: ["3600"]
+  readiness: {delay: "1s", period: "1s", failureThreshold: 1000, tcp: {socket: "127.0.0.1:1"}}
+- name: "file-fail"
+  entrypoint: "sleep"
+  args: ["3600"]
+  readiness: {delay: "1s", period: "1s", failureThreshold: 1000, file: {path: "/tmp/missing"}}
+- name: "env-fail"
+  entrypoint: "sleep"
+  args: ["3600"]
+  readiness: {delay: "1s", period: "1s", failureThreshold: 1000, env: {name: "PROBE_ENV", value: "enabled"}}
+- name: "exec-fail"
+  entrypoint: "sleep"
+  args: ["3600"]
+  readiness: {delay: "1s", period: "1s", failureThreshold: 1000, exec: {command: {entrypoint: "false"}}}
+- name: "exec-dir"   # exec probe runs in the process dir
+  entrypoint: "sleep"
+  args: ["3600"]
+  dir: "/e2e"
+  readiness: {delay: "1s", period: "1s", failureThreshold: 1000, exec: {command: {entrypoint: "test", args: ["-f", "probes-fail.yaml"]}}}

@@ -1,0 +1,10 @@
+# no heartbeat sender: heartbeats are sent by the test
+- name: "manual"
+  entrypoint: "sleep"
+  args: ["3600"]
+  readiness:
+    delay: "1s"
+    period: "1s"
+    failureThreshold: 1000
+    heartBeat:
+      period: "4s"

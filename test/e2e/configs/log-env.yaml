@@ -1,0 +1,4 @@
+# no logFormat: LOG_FORMAT env applies
+- name: "raw"
+  entrypoint: "sh"
+  args: ["-c", "echo 'raw line from LOG_FORMAT'; exec sleep 3600"]

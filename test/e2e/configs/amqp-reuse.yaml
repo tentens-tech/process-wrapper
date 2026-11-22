@@ -1,0 +1,8 @@
+- name: "amqp-reuse"
+  entrypoint: "sleep"
+  args: ["3600"]
+  envs:
+    AMQP_PROBE_RABBITMQ_DSN_TEMPLATE: "amqp://%v:%v@localhost:5672/"
+    AMQP_PROBE_RABBITMQ_USER: "guest"
+    AMQP_PROBE_RABBITMQ_PASS: "guest"
+  readiness: {delay: "1s", period: "1s", failureThreshold: 1000, amqp: {reuseConn: true}}

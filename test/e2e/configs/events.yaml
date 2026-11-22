@@ -1,0 +1,9 @@
+- name: "evt"
+  entrypoint: "sleep"
+  args: ["3600"]
+  readiness:
+    delay: "1s"
+    period: "1s"
+    failureThreshold: 2
+    file:
+      path: "/tmp/evt.ready"

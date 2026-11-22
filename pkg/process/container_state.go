@@ -117,6 +117,12 @@ func (p *PodStatus) ReadStatus() error {
 		log.Errorf("Pod status: %v", string(data))
 		return err
 	}
+	p.handleStatus()
+	return nil
+}
+
+// handleStatus stops the wrapper when the main container of the pod has completed
+func (p *PodStatus) handleStatus() {
 	log.Debugf("Pod status: %+v", p.Status.ContainerStatuses)
 	for _, s := range p.Status.ContainerStatuses {
 		log.Debugf("Container %v status: %+v", s.Name, s.State)
@@ -129,6 +135,4 @@ func (p *PodStatus) ReadStatus() error {
 			}
 		}
 	}
-
-	return err
 }

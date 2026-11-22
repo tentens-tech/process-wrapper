@@ -539,7 +539,10 @@ func (c *Command) HealthChecker(ctxRoutines context.Context, cancelRoutines cont
 	logger.Debugf("Start health checker routine")
 	if c.Readiness == nil {
 		logger.Warnf("Readiness probe is not set for the process")
-		_ = c.PostStartHookRunner(ctxRoutines, envs)
+		if !c.PostStartHookRunner(ctxRoutines, envs) && ctxRoutines.Err() == nil {
+			logger.Errorf("PostStart execution failure")
+			c.killProcess(cancelRoutines, logger, pid)
+		}
 		return
 	}
 	c.SetReadinessDelay(logger)

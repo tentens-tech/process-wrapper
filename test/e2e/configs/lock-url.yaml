@@ -1,0 +1,8 @@
+- name: "singleton2"
+  entrypoint: "sleep"
+  args: ["3600"]
+  readiness:
+    delay: "1s"
+    period: "1s"
+    lock:
+      ttlDuration: "3s"

@@ -194,7 +194,7 @@ are killed. Descendants that create their own session (`setsid`) are not tracked
 | `env` | `name`, `value` | the wrapper's env `name` equals `value` |
 | `sql` | `envs`, `queries`, `contains` | every query succeeds within 10s and the first column contains the expected values |
 | `amqp` | `envs`, `reuseConn` | connection to RabbitMQ succeeds |
-| `floatingPid` | `period` (`10s`), `threshold` (`1`) | the process wasn't restarted more than `threshold` times within `period` |
+| `floatingPid` | `period` (`10s`), `threshold` (`1`) | the process wasn't started more than `threshold` times within `period` (the default allows no restarts within 10s) |
 | `heartBeat` | `period` (`30s`) | the process sent a heartbeat (`PATCH /heartbeat?name=<name>`) within `period` |
 | `lock` | `ttlDuration` (`2s`) | the shared lock lease is kept alive (see "Shared lock") |
 
@@ -210,7 +210,8 @@ are killed. Descendants that create their own session (`setsid`) are not tracked
 start if there is no `readiness`). The process becomes ready only after the hook succeeds; if the hook fails
 or exceeds `deadline` (default `30s`), the process is restarted.
 
-A command hook gets the process envs, runs in the process `dir` (unless set) and never with more privileges
+A command hook gets the process envs with `postStart.envs` and `command.envs` on top (`postStart.envs` apply to the
+`sql` hook too, e.g. another `MYSQL_DSN`), runs in the process `dir` (unless set) and never with more privileges
 than the process: if the process drops privileges with `sysProcAttr.credential`, the hook (as well as `exec`
 probes) runs with the same credential. Hook output is limited to 64 KiB per stream, a hook that writes more
 is killed and considered failed.
@@ -218,9 +219,11 @@ is killed and considered failed.
 ```yaml
 postStart:
   deadline: "10s"
+  envs:
+    WARMUP_URL: "localhost:8080/warmup"
   command:
     entrypoint: "sh"
-    args: ["-c", "curl -sf -X POST localhost:8080/warmup"]
+    args: ["-c", "curl -sf -X POST $WARMUP_URL"]
   # or
   sql:                             # uses MYSQL_DSN from the process envs
     queries: ["SET GLOBAL read_only = 0"]
@@ -347,8 +350,12 @@ init container and run it as the entrypoint of the application container.
 ## Development
 
 ```sh
-make test   # go test
-make lint   # golangci-lint
-make vuln   # govulncheck
-make sec    # gosec
+make test        # go test
+make test-race   # go test -race
+make e2e         # end-to-end tests in docker, make e2e SUITES="basic signals" for some suites
+make lint        # golangci-lint
+make vuln        # govulncheck
+make sec         # gosec
 ```
+
+See [test/README.md](test/README.md) for the e2e suites and which test covers every option.

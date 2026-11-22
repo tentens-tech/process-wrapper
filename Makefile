@@ -4,7 +4,7 @@ VERSION := 0.9.22-test
 GIT_COMMIT := $(shell git rev-list -1 HEAD)
 
 .DEFAULT_GOAL := build
-.PHONY: help lint vuln sec test clean build build-version docker-build
+.PHONY: help lint vuln sec test test-race e2e clean build build-version docker-build
 
 version: ## Show version
 	@echo $(VERSION) \(git commit: $(GIT_COMMIT)\)
@@ -20,6 +20,12 @@ sec: ## Run gosec static security analysis
 
 test: ## Run only quick tests
 	go test -short  ./...
+
+test-race: ## Run all unit tests with the race detector
+	go test -race ./...
+
+e2e: ## Run end-to-end tests in docker, e.g. make e2e SUITES="basic signals"
+	test/e2e/run.sh $(SUITES)
 
 build: ## Build pulumi binary
 	go build -o ${BINARY} main.go

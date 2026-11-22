@@ -1,0 +1,6 @@
+- name: "graceful"   # finishes 2s after SIGTERM
+  entrypoint: "sh"
+  args: ["-c", "trap 'echo got TERM; sleep 2; echo bye; exit 0' TERM; while :; do sleep 1; done"]
+- name: "stubborn"   # ignores SIGTERM, killed after -graceful-shutdown-deadline
+  entrypoint: "sh"
+  args: ["-c", "trap 'echo ignoring TERM' TERM; while :; do sleep 1; done"]

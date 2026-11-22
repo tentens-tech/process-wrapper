@@ -1,0 +1,5 @@
+# AMQP_PROBE_RABBITMQ_* come from the wrapper env
+- name: "amqp-env"
+  entrypoint: "sleep"
+  args: ["3600"]
+  readiness: {delay: "1s", period: "2s", failureThreshold: 1000, amqp: {}}

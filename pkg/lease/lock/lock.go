@@ -24,6 +24,22 @@ type Lock struct {
 	Cli *clientv3.Client
 }
 
+// TLSInfo returns etcd client TLS files, a default path is used for every
+// file that isn't set
+func TLSInfo(caCert, clientCert, clientKey string) transport.TLSInfo {
+	orDefault := func(v, def string) string {
+		if v == "" {
+			return def
+		}
+		return v
+	}
+	return transport.TLSInfo{
+		TrustedCAFile: orDefault(caCert, DefaultCaCertPath),
+		CertFile:      orDefault(clientCert, DefaultClientCertPath),
+		KeyFile:       orDefault(clientKey, DefaultClientKeyPath),
+	}
+}
+
 func NewLock(etcdEndpoints, etcdCaCert, etcdClientCert, etcdClientKey string, sharedLockEtcdTLS bool) *Lock {
 	lock := &Lock{Cli: func() *clientv3.Client {
 		var (
@@ -36,26 +52,7 @@ func NewLock(etcdEndpoints, etcdCaCert, etcdClientCert, etcdClientKey string, sh
 				return nil
 			}
 			// Configure TLS
-			tlsInfo := transport.TLSInfo{
-				TrustedCAFile: func() string {
-					if etcdCaCert == "" {
-						return DefaultCaCertPath
-					}
-					return etcdCaCert
-				}(),
-				CertFile: func() string {
-					if etcdCaCert == "" {
-						return DefaultClientCertPath
-					}
-					return etcdClientCert
-				}(),
-				KeyFile: func() string {
-					if etcdCaCert == "" {
-						return DefaultClientKeyPath
-					}
-					return etcdClientKey
-				}(),
-			}
+			tlsInfo := TLSInfo(etcdCaCert, etcdClientCert, etcdClientKey)
 			tlsConfig, err = tlsInfo.ClientConfig()
 			if err != nil {
 				log.Fatalf("Failed to create TLS configuration for etcd endpoints: %v", err)
