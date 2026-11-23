@@ -1,6 +1,7 @@
 package process
 
 import (
+	"encoding/json"
 	"math/rand"
 	"process-wrapper/pkg/metrics"
 	"strings"
@@ -102,6 +103,17 @@ func (b *RestartBackoff) UnmarshalYAML(unmarshal func(interface{}) error) error 
 	type plain RestartBackoff
 	out := plain{Jitter: -1}
 	if err := unmarshal(&out); err != nil {
+		return err
+	}
+	*b = RestartBackoff(out)
+	return nil
+}
+
+// UnmarshalJSON does the same as UnmarshalYAML for the JSON CONFIG env
+func (b *RestartBackoff) UnmarshalJSON(data []byte) error {
+	type plain RestartBackoff
+	out := plain{Jitter: -1}
+	if err := json.Unmarshal(data, &out); err != nil {
 		return err
 	}
 	*b = RestartBackoff(out)

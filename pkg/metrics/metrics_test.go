@@ -465,3 +465,13 @@ func TestPushCommandRestartEvent_WritesToStdout(t *testing.T) {
 		t.Errorf("missing process_name=svc: %q", out)
 	}
 }
+
+// Events carry the extra labels without a VMAgent pusher (no preemption handling)
+func TestMergeLabelsLoadsExtraLabels(t *testing.T) {
+	resetExtraLabels()
+	t.Cleanup(resetExtraLabels)
+	t.Setenv("METRICS_JSON_EXTRA_LABELS", `{"team":"core"}`)
+	if got := MergeLabels(nil)["team"]; got != "core" {
+		t.Fatalf("extra label team = %q, want core", got)
+	}
+}

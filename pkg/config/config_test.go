@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -417,6 +418,26 @@ func TestRestartBackoffJitterYAML(t *testing.T) {
 		}
 		if got := c.ResolveBackoff().Jitter; got != tc.want {
 			t.Errorf("%q: jitter %v, want %v", tc.yaml, got, tc.want)
+		}
+	}
+}
+
+// JSON CONFIG applies the same jitter default as YAML
+func TestRestartBackoffJitterJSON(t *testing.T) {
+	for _, tc := range []struct {
+		json string
+		want float64
+	}{
+		{`{"restartBackoff":{"initialDelay":"2s"}}`, process.DefaultRestartBackoffJitter},
+		{`{"restartBackoff":{"jitter":0}}`, 0},
+		{`{"restartBackoff":{"jitter":0.5}}`, 0.5},
+	} {
+		var c process.Command
+		if err := json.Unmarshal([]byte(tc.json), &c); err != nil {
+			t.Fatalf("json.Unmarshal: %v", err)
+		}
+		if got := c.ResolveBackoff().Jitter; got != tc.want {
+			t.Errorf("%s: jitter %v, want %v", tc.json, got, tc.want)
 		}
 	}
 }

@@ -324,3 +324,19 @@ func TestAMQPProbeHandshakeTimeout(t *testing.T) {
 		t.Fatal("the AMQP handshake is not bounded by operationsTimeout")
 	}
 }
+
+// A job that completes during the readiness delay doesn't keep the pod not ready
+func TestCompletedJobDoesNotBlockReadiness(t *testing.T) {
+	stubJobFailed(t)
+	s := newTestState()
+	c := &Command{
+		Name: "job", Entrypoint: "true", IsJob: true, s: s,
+		Readiness: &Probe{Delay: Duration{time.Hour}, DNS: &DNSProbe{URL: "localhost"}},
+	}
+	if c.runOnce(context.Background()) {
+		t.Fatal("a completed job must not be restarted")
+	}
+	if _, ok := s.ProcessState()["job"]; ok || !s.Readiness() {
+		t.Fatalf("a completed job must not affect readiness: %v", s.ProcessState())
+	}
+}

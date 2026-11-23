@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -184,6 +185,18 @@ func GetExtraFileLabels() {
 	}
 }
 
+// extraLabelsMu guards the lazy loading and reading of the extra labels:
+// events are emitted from several goroutines
+var extraLabelsMu sync.Mutex
+
+// loadExtraLabels loads METRICS_JSON_EXTRA_LABELS and the labels file once
+func loadExtraLabels() {
+	extraLabelsMu.Lock()
+	defer extraLabelsMu.Unlock()
+	GetExtraJSONLabels()
+	GetExtraFileLabels()
+}
+
 func MergeLabels(merge map[string]string) map[string]string {
 	labels := map[string]string{
 		"pod":       os.Getenv("HOSTNAME"),
@@ -191,13 +204,15 @@ func MergeLabels(merge map[string]string) map[string]string {
 		"node":      os.Getenv("NODE_NAME"),
 	}
 
+	loadExtraLabels()
+	extraLabelsMu.Lock()
 	for k, v := range extraJSONLabels {
 		labels[k] = v
 	}
-
 	for k, v := range extraFileLabels {
 		labels[k] = v
 	}
+	extraLabelsMu.Unlock()
 
 	for k, v := range merge {
 		labels[k] = v
@@ -260,8 +275,7 @@ type VMAgentPusher struct {
 }
 
 func NewVMAgentPusher() *VMAgentPusher {
-	GetExtraJSONLabels()
-	GetExtraFileLabels()
+	loadExtraLabels()
 
 	url := os.Getenv("VMAGENT_PUSH_URL")
 	if url == "" {

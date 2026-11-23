@@ -520,7 +520,11 @@ func (c *Command) runOnce(ctx context.Context) bool {
 	postStartLogger.Printf("Run command")
 
 	// Run health checks
-	go c.HealthChecker(ctxRoutines, cancelRoutines, pid, envs)
+	healthDone := make(chan struct{})
+	go func() {
+		defer close(healthDone)
+		c.HealthChecker(ctxRoutines, cancelRoutines, pid, envs)
+	}()
 
 	// Get process cpu/memory stats
 	go c.GetStats(ctxRoutines, pid)
@@ -564,6 +568,10 @@ func (c *Command) runOnce(ctx context.Context) bool {
 			terminationLogger.Errorf("Job failed, time %v", time.Since(startTime))
 			jobFailed(1)
 		}
+		// A completed job must not keep the pod not ready: drop its readiness
+		// state once the health checker, which may still set it, has stopped
+		<-healthDone
+		c.s.RemoveState(c.Name)
 		terminationLogger.Printf("Job completed, time %v", time.Since(startTime))
 		return false
 	}
