@@ -13,12 +13,12 @@ e2e env: `E2E_KEEP=1` keeps the containers, `E2E_NO_BUILD=1` reuses the images,
 ## How e2e works
 
 [`e2e/run.sh`](e2e/run.sh) builds the image from `deployment/docker/Dockerfile` plus a tools layer
-([`e2e/tools.Dockerfile`](e2e/tools.Dockerfile): `curl`, `python3`, the user stays 65532) and runs every
+([`e2e/tools.Dockerfile`](e2e/tools.Dockerfile): `curl`, `python3` and the fake services, the user stays 65532) and runs every
 wrapper like in production: read-only root FS, tmpfs `/tmp`, non-root, `--cap-drop ALL`, `no-new-privileges`.
 All containers share the network namespace of `pw-netns`, so `localhost` in the configs reaches the dependencies.
 Dependencies are started only by the suites that need them: MySQL 8.4 (`sql`), RabbitMQ 4 (`amqp`),
 etcd 3.6 (`lock`, `lock-tls` with mTLS certificates generated per run) and
-[`e2e/fake.py`](e2e/fake.py) (`events`): GCE metadata, envoy admin and a UDP metrics-server.
+[`e2e/fake`](e2e/fake/main.go) (`events`): GCE metadata, envoy admin and a UDP metrics-server.
 
 Configs: [`examples/`](../examples) (every example is run) and [`e2e/configs/`](e2e/configs) for the cases the
 examples don't cover.

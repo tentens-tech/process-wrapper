@@ -116,8 +116,7 @@ need() {
         etcd --listen-client-urls=http://127.0.0.1:2379 --advertise-client-urls=http://localhost:2379 >/dev/null
       waitcheck "etcd is up" 30 docker exec pw-etcd etcdctl endpoint health ;;
     fake)
-      docker run -d --name pw-fake --network container:pw-netns -v "$E2E/fake.py:/fake.py:ro" \
-        $TIMG python3 -u /fake.py >/dev/null
+      docker run -d --name pw-fake --network container:pw-netns $TIMG e2e-fake >/dev/null
       waitcheck "fake services are up" 15 docker exec pw-fake curl -sf localhost:18080/drains ;;
   esac
 }
@@ -400,6 +399,7 @@ suite_events() {
     -e METRICS_EXTRA_LABELS_FILE_PATH=/repo/test/e2e/configs/labels -e METRICS_EXTRA_LABELS_FILE_EXCLUDE=pod-template-hash \
     -e HANDLE_PREEMPTION=true -e METADATA_URL=http://127.0.0.1:18080/preempted \
     -e ENVOY_DRAIN_URL=http://127.0.0.1:18080/drain -- -envoy-drain
+  # shellcheck disable=SC2329 # called through eval
   events() { docker exec pw-fake curl -s localhost:18080/events; }
   waitcheck "restart event" 20 eval 'events | grep "\"name\":\"restart\"" | grep -q "\"process_name\":\"evt\""'
   check "readiness failure event" eval 'events | grep -q "\"name\":\"readiness\""'
