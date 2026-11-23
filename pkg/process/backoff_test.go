@@ -278,3 +278,35 @@ func TestNextBackoffJitterDisabledExact(t *testing.T) {
 		t.Errorf("jitter=0 should be exact: got %v, want %v", got, want)
 	}
 }
+
+// The jitter doesn't compound between restarts and never exceeds maxDelay
+func TestRestartBackoffJitterDoesNotCompound(t *testing.T) {
+	cfg := RestartBackoff{
+		InitialDelay: Duration{time.Second}, MaxDelay: Duration{8 * time.Second},
+		Multiplier: 2, Jitter: 0.5,
+	}
+	for seed := int64(0); seed < 200; seed++ {
+		s := &backoffState{rng: rand.New(rand.NewSource(seed))}
+		base := time.Second
+		for step := 0; step < 8; step++ {
+			got := s.nextDelay(cfg)
+			low := time.Duration(float64(base) * 0.5)
+			high := time.Duration(float64(base) * 1.5)
+			if high > cfg.MaxDelay.Duration {
+				high = cfg.MaxDelay.Duration
+			}
+			if got < low || got > high {
+				t.Fatalf("seed %d step %d: %v outside [%v, %v]", seed, step, got, low, high)
+			}
+			base *= 2
+			if base > cfg.MaxDelay.Duration {
+				base = cfg.MaxDelay.Duration
+			}
+		}
+	}
+}
+
+// nextBackoff is the delay after prev, as the restart loop computes it
+func nextBackoff(prev time.Duration, cfg RestartBackoff, r *rand.Rand) time.Duration {
+	return jitterDelay(nextBaseDelay(prev, cfg), cfg, r)
+}

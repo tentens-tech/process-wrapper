@@ -260,6 +260,25 @@ func StartProcessWrapper() {
 	wg.Add(1)
 	wg.Wait()
 	log.Printf("All commands are completed")
+	waitForShutdown(ctx, state)
+}
+
+// waitForShutdown keeps the wrapper running after its commands have finished
+// (completed jobs, restartPolicy: never) until a signal arrives: exiting
+// would make the kubelet restart the container and run the jobs again
+func waitForShutdown(ctx context.Context, state *process.State) {
+	if ctx.Err() != nil || state.IsShutdown() {
+		return
+	}
+	log.Printf("Nothing left to run, waiting for a signal")
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for ctx.Err() == nil && !state.IsShutdown() {
+		select {
+		case <-ctx.Done():
+		case <-ticker.C:
+		}
+	}
 }
 
 func PrintConfigJSON(data []byte, err error) {

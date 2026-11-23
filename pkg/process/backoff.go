@@ -120,20 +120,17 @@ func (b *RestartBackoff) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// nextBackoff computes the next delay given the previous delay and a
-// configuration. It is a pure function — separated from Command state so
-// it can be unit-tested deterministically with a seeded *rand.Rand.
-//
-// Semantics:
+// Restart delays (see nextBaseDelay and jitterDelay):
 //   - prev <= 0 → start at cfg.InitialDelay (very first failure).
 //   - otherwise → min(prev * Multiplier, MaxDelay), but never below
 //     InitialDelay.
-//   - the result is then jittered uniformly in
-//     [base * (1 - Jitter), base * (1 + Jitter)].
-//   - Jitter == 0 disables the random component entirely; r is then
-//     unused and may be nil. Callers that pass Jitter > 0 must supply a
-//     non-nil rng — the Command-level wrapper takes care of that.
-func nextBackoff(prev time.Duration, cfg RestartBackoff, r *rand.Rand) time.Duration {
+//   - the delay is jittered uniformly in [base * (1 - Jitter),
+//     base * (1 + Jitter)] and capped at MaxDelay. Only the base is kept as
+//     the next prev, so the jitter doesn't compound. Jitter == 0 disables it.
+
+// nextBaseDelay is the exponential sequence without jitter: the jittered
+// delay isn't fed back, so the jitter doesn't compound between restarts
+func nextBaseDelay(prev time.Duration, cfg RestartBackoff) time.Duration {
 	var base time.Duration
 	if prev <= 0 {
 		base = cfg.InitialDelay.Duration
@@ -146,12 +143,20 @@ func nextBackoff(prev time.Duration, cfg RestartBackoff, r *rand.Rand) time.Dura
 	if base < cfg.InitialDelay.Duration {
 		base = cfg.InitialDelay.Duration
 	}
+	return base
+}
+
+// jitterDelay applies the jitter to base, the result never exceeds MaxDelay
+func jitterDelay(base time.Duration, cfg RestartBackoff, r *rand.Rand) time.Duration {
 	if cfg.Jitter <= 0 {
 		return base
 	}
 	// Float64 returns [0.0, 1.0); map to [-Jitter, +Jitter].
 	delta := (r.Float64()*2 - 1) * cfg.Jitter
 	out := time.Duration(float64(base) * (1 + delta))
+	if out > cfg.MaxDelay.Duration {
+		out = cfg.MaxDelay.Duration
+	}
 	if out < 0 {
 		out = 0
 	}
@@ -219,9 +224,9 @@ func (s *backoffState) nextDelay(cfg RestartBackoff) time.Duration {
 		// Lazy init — non-cryptographic, jitter only.
 		s.rng = rand.New(rand.NewSource(time.Now().UnixNano())) // #nosec G404
 	}
-	s.current = nextBackoff(s.current, cfg, s.rng)
+	s.current = nextBaseDelay(s.current, cfg)
 	s.failures++
-	return s.current
+	return jitterDelay(s.current, cfg, s.rng)
 }
 
 // reset clears the counter only when armed; returns true when an actual

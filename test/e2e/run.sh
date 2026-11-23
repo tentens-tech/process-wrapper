@@ -489,6 +489,16 @@ suite_lifecycle() {
   check "isJob: wrapper keeps running" eval 'running && get -f "localhost:8111/pidof?name=app"'
   finish
 
+  start job-only test/e2e/configs/job-only.yaml
+  waitcheck "only a job: completed" 10 has_log 'Job completed'
+  sleep 2
+  check "only a job: wrapper keeps running" eval 'running && has_log "waiting for a signal"'
+  check "only a job: ready" code 200 localhost:8111/readiness
+  docker kill -s TERM "$CUR" >/dev/null
+  waitcheck "only a job: SIGTERM stops the wrapper" 10 stopped
+  check "only a job: exit code 0" exit_code 0
+  finish
+
   start job-fail test/e2e/configs/job-fail.yaml
   waitcheck "isJob: failed job stops the wrapper" 15 stopped
   check "isJob: exit code 1" exit_code 1

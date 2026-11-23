@@ -85,6 +85,8 @@ func Run(ctx context.Context, cfg Config) {
 		}
 		stderr, err := cmd.StderrPipe()
 		if err != nil {
+			// Start isn't called, so os/exec doesn't close the stdout pipe
+			_ = stdout.Close()
 			logger.Errorf("Cannot connect stderr: %v", err)
 			metrics.SidecarPhpScopeRestartsTotal.WithLabelValues("pipe_error").Inc()
 			waitRestart(ctx)
