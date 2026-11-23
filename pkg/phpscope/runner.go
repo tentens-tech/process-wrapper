@@ -14,15 +14,16 @@ import (
 	"os/exec"
 	"process-wrapper/pkg/metrics"
 	"strconv"
+	"syscall"
 	"time"
 
 	log "github.com/sirupsen/logrus"
 )
 
-const (
-	binaryPath     = "/usr/bin/phpscope"
-	restartBackoff = 2 * time.Second
-)
+const restartBackoff = 2 * time.Second
+
+// binaryPath is the phpscope binary, replaced in tests
+var binaryPath = "/usr/bin/phpscope"
 
 // Config drives the phpscope subprocess. Zero values are treated as "not set".
 type Config struct {
@@ -75,6 +76,10 @@ func Run(ctx context.Context, cfg Config) {
 
 		cmd := exec.CommandContext(ctx, binaryPath, args...) // #nosec G204
 		cmd.Env = os.Environ()
+		// Own process group: a stop or restart reaches phpspy and the other
+		// children of phpscope too
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error { return killGroup(cmd.Process.Pid) }
 
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
@@ -105,6 +110,8 @@ func Run(ctx context.Context, cfg Config) {
 		go streamOutput(logger, stderr, "stderr")
 
 		err = cmd.Wait()
+		// Children left in the group must not outlive phpscope
+		_ = killGroup(cmd.Process.Pid)
 		if ctx.Err() != nil {
 			logger.Printf("Context cancelled, stop phpscope runner")
 			return
@@ -122,6 +129,14 @@ func Run(ctx context.Context, cfg Config) {
 		metrics.SidecarPhpScopeRestartsTotal.WithLabelValues(reason).Inc()
 		waitRestart(ctx)
 	}
+}
+
+// killGroup kills the process group led by pid
+func killGroup(pid int) error {
+	if pid <= 0 {
+		return syscall.ESRCH
+	}
+	return syscall.Kill(-pid, syscall.SIGKILL)
 }
 
 func streamOutput(logger *log.Entry, r io.Reader, stream string) {

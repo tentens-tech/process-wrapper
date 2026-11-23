@@ -392,9 +392,10 @@ func (s *State) WaitPreemptionState() {
 			continue
 		}
 		if status == "TRUE" {
-			s.vmPusher.PushPreempted(1)
+			// Stop the traffic first, the push may take up to its timeout
 			s.preemptedEvent <- struct{}{}
 			log.Warnf("Node is preempted and terminated soon")
+			s.vmPusher.PushPreempted(1)
 			return
 		}
 		log.Debugf("Preemption status: %v", status)

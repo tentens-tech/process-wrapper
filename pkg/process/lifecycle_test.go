@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -434,5 +435,39 @@ func TestJobStoppedOnContextCancel(t *testing.T) {
 	}
 	if *code != -1 {
 		t.Fatalf("a job stopped by context cancel must not stop the wrapper, exit code %v", *code)
+	}
+}
+
+// The DNS baseline is taken at the process start: an address change during
+// the readiness delay fails the probe instead of becoming the baseline
+func TestDNSBaselineTakenAtStart(t *testing.T) {
+	var mu sync.Mutex
+	addr := "192.0.2.1"
+	old := lookupIP
+	lookupIP = func(context.Context, string) ([]net.IP, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return []net.IP{net.ParseIP(addr)}, nil
+	}
+	t.Cleanup(func() { lookupIP = old })
+
+	s := newTestState()
+	c := &Command{
+		Name: "app", s: s,
+		Readiness: &Probe{
+			Delay: Duration{300 * time.Millisecond}, Period: Duration{10 * time.Millisecond},
+			FailureThreshold: 1000, DNS: &DNSProbe{URL: "broker"},
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.HealthChecker(ctx, cancel, 0, nil)
+	time.Sleep(100 * time.Millisecond)
+	mu.Lock()
+	addr = "192.0.2.2"
+	mu.Unlock()
+	time.Sleep(500 * time.Millisecond)
+	if s.ProcessState()["app"] {
+		t.Fatal("an address change during the readiness delay must fail the DNS probe")
 	}
 }

@@ -93,10 +93,15 @@ func (p *DNSProbe) timeout() time.Duration {
 	return DefaultDNSProbeTimeout
 }
 
+// lookupIP resolves a name, replaced in tests
+var lookupIP = func(ctx context.Context, host string) ([]net.IP, error) {
+	return net.DefaultResolver.LookupIP(ctx, "ip", host)
+}
+
 func getAddressListByURL(url string, timeout time.Duration) (addressList []net.IP, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	addressList, err = net.DefaultResolver.LookupIP(ctx, "ip", url)
+	addressList, err = lookupIP(ctx, url)
 	if err != nil {
 		return nil, err
 	}

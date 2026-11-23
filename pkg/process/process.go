@@ -678,9 +678,13 @@ func (c *Command) HealthChecker(ctxRoutines context.Context, cancelRoutines cont
 	c.SetReadinessDelay(logger)
 	c.SetReadinessPeriod(logger)
 	c.SetReadinessFailureThreshold(logger)
-	// The DNS probe compares addresses with the ones of this process run
+	// The DNS probe compares addresses with the ones at the process start:
+	// the baseline is taken now, not after the readiness delay, so a change
+	// during the delay restarts the process. If the lookup fails, the first
+	// probe run takes the baseline
 	if c.Readiness.DNS != nil {
 		c.Readiness.DNS.reset()
+		c.Readiness.DNS.Run(c.Name)
 	}
 
 	log.Debugf("Readiness Delay: %v", c.Readiness.Delay)
