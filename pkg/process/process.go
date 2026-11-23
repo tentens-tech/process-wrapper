@@ -552,6 +552,10 @@ func (c *Command) runOnce(ctx context.Context) bool {
 	if normalizeRestartPolicy(c.RestartPolicy) == RestartPolicyNewer {
 		terminationLogger.Warnf("Restart policy is 'never', do not restart")
 		cancelRoutines()
+		// The process won't come back: its readiness is final once the health
+		// checker, which may still set it, has stopped. Exit code 0 is ready
+		<-healthDone
+		c.s.SetState(c.Name, exitCode == 0)
 		return false
 	}
 
@@ -568,10 +572,11 @@ func (c *Command) runOnce(ctx context.Context) bool {
 			terminationLogger.Errorf("Job failed, time %v", time.Since(startTime))
 			jobFailed(1)
 		}
-		// A completed job must not keep the pod not ready: drop its readiness
-		// state once the health checker, which may still set it, has stopped
+		// A completed job counts as ready (it must not keep the pod not ready,
+		// and the readiness file waits for at least one ready process), once
+		// the health checker, which may still set the state, has stopped
 		<-healthDone
-		c.s.RemoveState(c.Name)
+		c.s.SetState(c.Name, true)
 		terminationLogger.Printf("Job completed, time %v", time.Since(startTime))
 		return false
 	}

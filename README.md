@@ -198,9 +198,10 @@ All fields are optional (the values above are the defaults). The delay is also r
 probe passes. The current delay is exported as `sidecar_cmd_restart_backoff_seconds`. A shutdown signal
 interrupts the back-off.
 
-- `restartPolicy: never` — the process is not restarted after it exits (`always` is the default).
-- `isJob: true` — the process runs to completion (e.g. a migration): after exit code 0 it isn't restarted,
-  a non-zero exit code stops the wrapper with exit code 1. A job killed by the wrapper (failed probe,
+- `restartPolicy: never` — the process is not restarted after it exits (`always` is the default); after exit
+  code 0 it counts as ready, after a non-zero exit code the pod stays not ready.
+- `isJob: true` — the process runs to completion (e.g. a migration): after exit code 0 it isn't restarted
+  and counts as ready, a non-zero exit code stops the wrapper with exit code 1. A job killed by the wrapper (failed probe,
   memory limit) is restarted.
 
 The wrapper keeps running while there is nothing left to run; stop it with a signal.

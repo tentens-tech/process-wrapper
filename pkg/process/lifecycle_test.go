@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -339,8 +340,52 @@ func TestCompletedJobDoesNotBlockReadiness(t *testing.T) {
 	if c.runOnce(context.Background()) {
 		t.Fatal("a completed job must not be restarted")
 	}
-	if _, ok := s.ProcessState()["job"]; ok || !s.Readiness() {
-		t.Fatalf("a completed job must not affect readiness: %v", s.ProcessState())
+	if ready, ok := s.ProcessState()["job"]; !ok || !ready || !s.Readiness() {
+		t.Fatalf("a completed job must count as ready: %v", s.ProcessState())
+	}
+}
+
+// The readiness file is written for a config with only a completed job
+func TestCompletedJobWritesReadinessFile(t *testing.T) {
+	stubJobFailed(t)
+	s := newTestState()
+	s.ReadinessFile = filepath.Join(t.TempDir(), "started")
+	c := &Command{Name: "job", Entrypoint: "true", IsJob: true, s: s}
+	c.runOnce(context.Background())
+	done := make(chan struct{})
+	go func() { s.CreateReadinessFile(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the readiness file is not written after the job completed")
+	}
+}
+
+// restartPolicy: never: the final readiness follows the exit code, even when
+// the process exits during the readiness delay or after it became ready
+func TestRestartPolicyNeverReadiness(t *testing.T) {
+	for _, tc := range []struct {
+		script string
+		delay  time.Duration
+		ready  bool
+	}{
+		{"exit 0", time.Hour, true},
+		{"exit 1", time.Hour, false},
+		{"sleep 0.3; exit 1", time.Millisecond, false},
+		{"sleep 0.3; exit 0", time.Millisecond, true},
+	} {
+		s := newTestState()
+		c := &Command{
+			Name: "once", Entrypoint: "sh", Args: []string{"-c", tc.script}, RestartPolicy: "never", s: s,
+			Readiness: &Probe{
+				Delay: Duration{tc.delay}, Period: Duration{10 * time.Millisecond}, FailureThreshold: 1000,
+				DNS: &DNSProbe{URL: "localhost"},
+			},
+		}
+		c.runOnce(context.Background())
+		if got := s.ProcessState()["once"]; got != tc.ready {
+			t.Errorf("%q (delay %v): ready %v, want %v", tc.script, tc.delay, got, tc.ready)
+		}
 	}
 }
 

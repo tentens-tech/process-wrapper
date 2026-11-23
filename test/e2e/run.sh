@@ -494,6 +494,7 @@ suite_lifecycle() {
   sleep 2
   check "only a job: wrapper keeps running" eval 'running && has_log "waiting for a signal"'
   check "only a job: ready" code 200 localhost:8111/readiness
+  check "only a job: readiness file created" x test -f /tmp/started
   docker kill -s TERM "$CUR" >/dev/null
   waitcheck "only a job: SIGTERM stops the wrapper" 10 stopped
   check "only a job: exit code 0" exit_code 0
@@ -509,6 +510,7 @@ suite_lifecycle() {
   waitcheck "restartPolicy: never logged" 10 has_log "Restart policy is 'never'"
   sleep 3
   check "restartPolicy: never not restarted" eval '[ $(count_log "msg=\"once-ran") = 1 ] && running'
+  check "restartPolicy: never failed -> not ready" unready
   finish
 
   start backoff test/e2e/configs/backoff.yaml
