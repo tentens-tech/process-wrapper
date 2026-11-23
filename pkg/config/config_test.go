@@ -399,3 +399,24 @@ func TestCommandRestartPolicyYAML(t *testing.T) {
 		})
 	}
 }
+
+// An omitted jitter gets the default, an explicit 0 disables it
+func TestRestartBackoffJitterYAML(t *testing.T) {
+	for _, tc := range []struct {
+		yaml string
+		want float64
+	}{
+		{"restartBackoff:\n  initialDelay: 2s\n", process.DefaultRestartBackoffJitter},
+		{"restartBackoff:\n  jitter: 0\n", 0},
+		{"restartBackoff:\n  jitter: 0.5\n", 0.5},
+		{"entrypoint: x\n", process.DefaultRestartBackoffJitter},
+	} {
+		var c process.Command
+		if err := yaml.Unmarshal([]byte(tc.yaml), &c); err != nil {
+			t.Fatalf("yaml.Unmarshal: %v", err)
+		}
+		if got := c.ResolveBackoff().Jitter; got != tc.want {
+			t.Errorf("%q: jitter %v, want %v", tc.yaml, got, tc.want)
+		}
+	}
+}

@@ -551,9 +551,15 @@ func (c *Command) runOnce(ctx context.Context) bool {
 		return false
 	}
 
-	// A job that exited by itself isn't restarted, a failed job stops the wrapper
+	// A job that exited by itself isn't restarted, a failed job stops the wrapper.
+	// A job stopped by a graceful shutdown isn't a failure: the wrapper
+	// finishes the shutdown of the other commands
 	if c.IsJob && !c.s.IsKilled(c.Name) {
 		cancelRoutines()
+		if c.s.IsShutdown() {
+			terminationLogger.Printf("Job stopped on shutdown, time %v", time.Since(startTime))
+			return false
+		}
 		if exitCode != 0 {
 			terminationLogger.Errorf("Job failed, time %v", time.Since(startTime))
 			jobFailed(1)
@@ -791,6 +797,8 @@ func (c *Command) ProbeRunner(ctx context.Context, cancelRoutines context.Cancel
 					}
 				}
 				c.s.SetState(c.Name, true)
+				// The process became ready: the next crash starts from initialDelay
+				c.ResetRestartBackoff("readiness")
 			}
 			logger.Debugf("Sleep before the next health checking action")
 			if !sleepCtx(ctx, c.Readiness.Period.Duration) {

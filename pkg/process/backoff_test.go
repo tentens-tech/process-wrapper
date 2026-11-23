@@ -34,8 +34,8 @@ func TestRestartBackoffWithDefaultsZero(t *testing.T) {
 	if got.SuccessThreshold.Duration != DefaultRestartBackoffSuccessThreshold {
 		t.Errorf("SuccessThreshold = %v, want %v", got.SuccessThreshold.Duration, DefaultRestartBackoffSuccessThreshold)
 	}
-	if got.Jitter != 0 { // explicit zero value should NOT be replaced.
-		t.Errorf("Jitter from a nil receiver should stay 0 (explicit), got %v", got.Jitter)
+	if got.Jitter != DefaultRestartBackoffJitter {
+		t.Errorf("Jitter from a nil receiver = %v, want default %v", got.Jitter, DefaultRestartBackoffJitter)
 	}
 }
 

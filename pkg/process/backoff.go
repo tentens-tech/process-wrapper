@@ -68,7 +68,7 @@ type RestartBackoff struct {
 // defaulted configuration. The returned value is by-value to make callers
 // resilient to in-place mutation by other goroutines.
 func (b *RestartBackoff) WithDefaults() RestartBackoff {
-	out := RestartBackoff{}
+	out := RestartBackoff{Jitter: DefaultRestartBackoffJitter}
 	if b != nil {
 		out = *b
 	}
@@ -94,6 +94,18 @@ func (b *RestartBackoff) WithDefaults() RestartBackoff {
 		out.Jitter = 1
 	}
 	return out
+}
+
+// UnmarshalYAML applies the default jitter when the field is omitted, an
+// explicit `jitter: 0` still disables it
+func (b *RestartBackoff) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	type plain RestartBackoff
+	out := plain{Jitter: -1}
+	if err := unmarshal(&out); err != nil {
+		return err
+	}
+	*b = RestartBackoff(out)
+	return nil
 }
 
 // nextBackoff computes the next delay given the previous delay and a

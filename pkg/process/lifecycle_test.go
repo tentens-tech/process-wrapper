@@ -228,3 +228,53 @@ func TestLogsEnabledDefault(t *testing.T) {
 		t.Error("logs are enabled by default")
 	}
 }
+
+// A job stopped by a graceful shutdown doesn't stop the wrapper with exit code 1
+func TestJobStoppedOnShutdown(t *testing.T) {
+	code := stubJobFailed(t)
+	s := newTestState()
+	c := &Command{Name: "job", Entrypoint: "sleep", Args: []string{"300"}, IsJob: true, s: s}
+	done := make(chan bool)
+	go func() { done <- c.runOnce(context.Background()) }()
+	waitFor(t, "job started", func() bool { return s.GetPid("job") != 0 })
+	s.SetShutdown()
+	c.terminateProcess(log.WithField("test", t.Name()), s.GetPid("job"))
+	if <-done {
+		t.Fatal("a job stopped on shutdown must not be restarted")
+	}
+	if *code != -1 {
+		t.Fatalf("a job stopped on shutdown must not stop the wrapper, exit code %v", *code)
+	}
+}
+
+// A ready process resets the restart back-off to initialDelay
+func TestReadinessResetsRestartBackoff(t *testing.T) {
+	s := newTestState()
+	c := &Command{
+		Name: "app",
+		s:    s,
+		RestartBackoff: &RestartBackoff{
+			InitialDelay: Duration{time.Second}, MaxDelay: Duration{time.Minute},
+			SuccessThreshold: Duration{time.Hour},
+		},
+		Readiness: &Probe{
+			Delay:            Duration{time.Millisecond},
+			Period:           Duration{10 * time.Millisecond},
+			FailureThreshold: 3,
+			DNS:              &DNSProbe{URL: "localhost"},
+		},
+	}
+	c.NextRestartDelay()
+	c.NextRestartDelay()
+	if n := c.FailureCount(); n != 2 {
+		t.Fatalf("failure count %v, want 2", n)
+	}
+	c.ArmRestartBackoffReset()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.HealthChecker(ctx, cancel, 0, nil)
+	waitFor(t, "back-off reset", func() bool { return c.FailureCount() == 0 })
+	if d := c.NextRestartDelay(); d != time.Second {
+		t.Fatalf("delay after reset %v, want initialDelay 1s", d)
+	}
+}
