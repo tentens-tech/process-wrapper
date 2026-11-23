@@ -557,6 +557,16 @@ suite_amqp() {
   finish
   start amqp-reuse test/e2e/configs/amqp-reuse.yaml
   waitcheck "reuseConn: ready" 20 ready
+  # a message in the probe queue is consumed (auto ack), not left unacked
+  get -u guest:guest -H 'content-type: application/json' -X POST \
+    -d '{"properties":{},"routing_key":"amqp-probe-queue","payload":"x","payload_encoding":"string"}' \
+    'localhost:15672/api/exchanges/%2F/amq.default/publish' >/dev/null
+  # queue stats are refreshed every 5s
+  sleep 8
+  local q
+  q=$(get -u guest:guest 'localhost:15672/api/queues/%2F/amqp-probe-queue?columns=messages,messages_unacknowledged')
+  check "probe queue message consumed, nothing unacked ($q)" eval \
+    'grep -q "\"messages\":0[,}]" <<<"$q" && grep -q "\"messages_unacknowledged\":0[,}]" <<<"$q"'
   check "reuseConn: one connection kept" eval '[ "$(docker exec -u rabbitmq pw-rabbitmq rabbitmqctl -q list_connections | grep -c .)" -ge 1 ]'
   docker exec -u rabbitmq pw-rabbitmq rabbitmqctl -q close_all_connections e2e >/dev/null
   waitcheck "reuseConn: closed connection detected" 10 has_log 'reset amqp probe connection'

@@ -96,7 +96,9 @@ func (p *AMQPProbe) Run(name string) bool {
 	logger.Debugf("Reuse existing connection")
 
 	if err := c.withDeadline(p.timeout(), func() error {
-		_, _, err := c.channel.Get(AMQPProbeQueueName, false)
+		// autoAck: a message in the probe queue isn't for anyone, it must
+		// not stay unacked on the kept channel
+		_, _, err := c.channel.Get(AMQPProbeQueueName, true)
 		return err
 	}); err != nil {
 		logger.Warnf("Error getting queue, reset amqp probe connection, %v", err)

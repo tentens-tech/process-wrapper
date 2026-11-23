@@ -564,7 +564,9 @@ func (c *Command) runOnce(ctx context.Context) bool {
 	// finishes the shutdown of the other commands
 	if c.IsJob && !c.s.IsKilled(c.Name) {
 		cancelRoutines()
-		if c.s.IsShutdown() {
+		// HANDLE_TERMINATION and a fast shutdown cancel ctx without the
+		// shutdown state, os/exec then kills the job
+		if c.s.IsShutdown() || ctx.Err() != nil {
 			terminationLogger.Printf("Job stopped on shutdown, time %v", time.Since(startTime))
 			return false
 		}

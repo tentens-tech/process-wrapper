@@ -417,3 +417,22 @@ func TestRestartWaitsForHealthChecker(t *testing.T) {
 		t.Fatalf("%v probe(s) of the previous run still in flight at restart", n)
 	}
 }
+
+// A job killed because the root context is cancelled (HANDLE_TERMINATION
+// without the shutdown state) doesn't stop the wrapper with exit code 1
+func TestJobStoppedOnContextCancel(t *testing.T) {
+	code := stubJobFailed(t)
+	s := newTestState()
+	c := &Command{Name: "job", Entrypoint: "sleep", Args: []string{"300"}, IsJob: true, s: s}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan bool)
+	go func() { done <- c.runOnce(ctx) }()
+	waitFor(t, "job started", func() bool { return s.GetPid("job") != 0 })
+	cancel()
+	if <-done {
+		t.Fatal("a job stopped by context cancel must not be restarted")
+	}
+	if *code != -1 {
+		t.Fatalf("a job stopped by context cancel must not stop the wrapper, exit code %v", *code)
+	}
+}
