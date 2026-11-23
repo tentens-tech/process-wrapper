@@ -27,10 +27,10 @@ FROM alpine:3.24 AS process-wrapper
 
 # Unprivileged runtime user. Numeric UID/GID so that Kubernetes
 # `runAsNonRoot: true` can verify it without resolving names.
-ARG UID=65532
-ARG GID=65532
-RUN addgroup -S -g "${GID}" nonroot && \
-    adduser -S -D -H -u "${UID}" -G nonroot -h /nonexistent -s /sbin/nologin nonroot
+ARG UID=1010
+ARG GID=1010
+RUN addgroup -S -g "${GID}" appuser && \
+    adduser -S -D -H -u "${UID}" -G appuser -h /nonexistent -s /sbin/nologin appuser
 
 # The binary is owned by root and read-only for everyone, so the runtime user
 # can't modify it. The image is designed for a read-only root filesystem:

@@ -2,8 +2,9 @@ package process
 
 import (
 	"fmt"
-	log "github.com/sirupsen/logrus"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // DefaultHeartBeatPeriod is used when heartBeat.period isn't set

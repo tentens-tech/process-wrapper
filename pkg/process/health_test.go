@@ -41,8 +41,13 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 func TestReadinessStates(t *testing.T) {
 	s := newTestState()
 	s.SetState("app", false)
-	if s.Readiness() || s.Liveness() {
-		t.Fatal("not started process must not be ready/live")
+	if s.Readiness() {
+		t.Fatal("not started process must not be ready")
+	}
+	// Liveness always passes: restarts are handled by the wrapper itself,
+	// kubelet must not restart the whole pod because of a degraded process
+	if !s.Liveness() {
+		t.Fatal("liveness must always pass")
 	}
 	s.SetState("app", true)
 	if !s.Readiness() || !s.Liveness() {
@@ -276,5 +281,17 @@ func TestRemovePidAndKnownProcess(t *testing.T) {
 	s.RemovePid("app", 10)
 	if s.GetPid("app") != 0 {
 		t.Fatal("pid not removed")
+	}
+}
+
+func TestWithMetadataQuery(t *testing.T) {
+	for in, want := range map[string]string{
+		"http://m/preempted":     "http://m/preempted?wait_for_change=true&timeout_sec=55",
+		"http://m/preempted?x=1": "http://m/preempted?x=1&wait_for_change=true&timeout_sec=55",
+		"http://m/preempted?wait_for_change=true&timeout_sec=60": "http://m/preempted?wait_for_change=true&timeout_sec=60",
+	} {
+		if got := withMetadataQuery(in); got != want {
+			t.Errorf("withMetadataQuery(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

@@ -1,0 +1,16 @@
+# dns probe: records the addresses of `url` when the process starts and fails
+# when they change, so the process is restarted after failureThreshold and
+# connects to the new addresses. Useful for clients that resolve a broker or
+# a database only once.
+#
+#   go run . -config examples/dns-probe.yaml
+#   curl -s localhost:8111/status
+- name: "app"
+  entrypoint: "sleep"
+  args: ["3600"]
+  readiness:
+    delay: "5s"
+    period: "4s"
+    failureThreshold: 2
+    dns:
+      url: "localhost"

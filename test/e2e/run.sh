@@ -9,7 +9,7 @@
 # logs directory (default test/e2e/.logs), E2E_NO_BUILD=1 reuses the images.
 #
 # Every container shares the network namespace of pw-netns, so "localhost"
-# reaches mysql/rabbitmq/etcd and the fake services exactly like on a
+# reaches mysql/rabbitmq and the fake services exactly like on a
 # developer machine. Wrappers run like in production: read-only root FS,
 # non-root user, no capabilities.
 # Checks are passed to eval in single quotes on purpose
@@ -22,7 +22,7 @@ IMG=process-wrapper:e2e
 TIMG=process-wrapper:e2e-tools
 LOGDIR=${E2E_LOGDIR:-$E2E/.logs}
 SUITES=(image basic probes hooks logs envs floating heartbeat prommerge termination signals
-  memory flags events credential hardening sql amqp lock lock-tls)
+  memory flags events credential hardening lifecycle sql amqp lock)
 PASS=0 FAIL=0 FAILED=()
 
 # ---------------------------------------------------------------- helpers
@@ -93,7 +93,7 @@ cleanup() { docker ps -aq --filter name='^pw-' | xargs docker rm -f >/dev/null 2
 # save logs of the dependencies, then remove all containers
 teardown() {
   local c
-  for c in pw-mysql pw-rabbitmq pw-etcd; do
+  for c in pw-mysql pw-rabbitmq; do
     docker inspect "$c" >/dev/null 2>&1 && docker logs "$c" >"$LOGDIR/$c.log" 2>&1
   done
   [ -n "${E2E_KEEP:-}" ] || cleanup
@@ -111,10 +111,6 @@ need() {
     rabbitmq)
       docker run -d --name pw-rabbitmq --network container:pw-netns rabbitmq:4-management >/dev/null
       waitcheck "rabbitmq is up" 120 docker exec -u rabbitmq pw-rabbitmq rabbitmq-diagnostics -q check_port_connectivity ;;
-    etcd)
-      docker run -d --name pw-etcd --network container:pw-netns gcr.io/etcd-development/etcd:v3.6.6 \
-        etcd --listen-client-urls=http://127.0.0.1:2379 --advertise-client-urls=http://localhost:2379 >/dev/null
-      waitcheck "etcd is up" 30 docker exec pw-etcd etcdctl endpoint health ;;
     fake)
       docker run -d --name pw-fake --network container:pw-netns $TIMG e2e-fake >/dev/null
       waitcheck "fake services are up" 15 docker exec pw-fake curl -sf localhost:18080/drains ;;
@@ -124,7 +120,7 @@ need() {
 # ---------------------------------------------------------------- suites
 
 suite_image() {
-  check "image runs as uid 65532" eval '[ "$(docker run --rm $TIMG id -u)" = 65532 ]'
+  check "image runs as uid 1010" eval '[ "$(docker run --rm $TIMG id -u)" = 1010 ]'
   check "binary is root-owned and read-only" eval \
     'docker run --rm $TIMG stat -c "%u %a" /usr/bin/process-wrapper | grep -qx "0 555"'
   check "-version" docker run --rm $IMG process-wrapper -version
@@ -156,6 +152,7 @@ suite_basic() {
   check "wrapper stats metric" metric 'sidecar_cmd_memory_usage_bytes{process_name="process-wrapper"}'
   x rm -f /tmp/worker-1.ready
   waitcheck "not ready after the probe fails" 10 unready
+  check "liveness passes while a process is not ready" code 200 localhost:8111/liveness
   check "/status reports the failing process" eval 'get localhost:8111/status | grep -q "\"worker-1\":false"'
   waitcheck "restart after failureThreshold" 25 has_log 'Restart command'
   check "SIGTERM before SIGKILL on restart" has_log 'Send SIGTERM'
@@ -183,6 +180,10 @@ suite_probes() {
   done
   check "exec probe runs in the process dir" eval "get localhost:8111/status | grep -q '\"exec-dir\":true'"
   check "failed probes don't restart below failureThreshold" no_log 'Restart command'
+  finish
+  start dns test/e2e/configs/dns.yaml
+  waitcheck "dns probe passes" 10 eval "get localhost:8111/status | grep -q '\"dns\":true'"
+  check "dns probe fails for an unresolvable name" eval "get localhost:8111/status | grep -q '\"dns-fail\":false'"
   finish
 }
 
@@ -215,6 +216,15 @@ suite_logs() {
   start log-env test/e2e/configs/log-env.yaml -e LOG_FORMAT=free
   sleep 3
   check "LOG_FORMAT env applies to all processes" eval "logs | grep -qx 'raw line from LOG_FORMAT'"
+  finish
+  start log-filter test/e2e/configs/logs-filter.yaml -e LOG_LEVELS=warning,error
+  sleep 3
+  check "logs: false drops the output" no_log 'msg="hidden-line'
+  check "logLevels keeps allowed levels" has_log 'msg=cmd-error'
+  check "logLevels overrides LOG_LEVELS" no_log 'msg=cmd-info'
+  check "LOG_LEVELS keeps allowed levels" has_log 'msg=global-warning'
+  check "LOG_LEVELS drops other levels" eval "no_log msg=global-info && no_log msg=global-debug"
+  check "LOG_LEVELS filters auto-detected levels" eval "has_log 'msg=\"WARNING auto-warning line' && no_log 'msg=\"auto-info line'"
   finish
 }
 
@@ -381,6 +391,11 @@ suite_flags() {
   waitcheck "-pyroscope-url with an unreachable server doesn't break the wrapper" 10 eval 'ready && running'
   finish
 
+  start phpscope test/e2e/configs/two.yaml -- -php-pyroscope-url http://127.0.0.1:1 -php-app-name e2e.php
+  waitcheck "-php-pyroscope-url without the phpscope binary only logs an error" 10 \
+    eval 'ready && running && has_log "phpscope binary is missing"'
+  finish
+
   start pid-file test/e2e/configs/two.yaml --init -- -pid-file /tmp/pw.pid
   waitcheck "-pid-file written when not PID 1 (--init)" 10 eval '[ "$(x cat /tmp/pw.pid)" -gt 1 ]'
   check "signals forwarded by --init" eval "[ \$(stop_with TERM) -le 5 ] && has_log 'Received terminated'"
@@ -394,20 +409,24 @@ suite_flags() {
 suite_events() {
   need fake
   start events test/e2e/configs/events.yaml \
-    -e METRICS_SERVER_ADDRESS=127.0.0.1:18125 -e HOSTNAME=pod-e2e -e POD_NAMESPACE=ns-e2e -e NODE_NAME=node-e2e \
+    -e HOSTNAME=pod-e2e -e POD_NAMESPACE=ns-e2e -e NODE_NAME=node-e2e \
     -e METRICS_JSON_EXTRA_LABELS='{"k8s_cluster":"e2e"}' \
     -e METRICS_EXTRA_LABELS_FILE_PATH=/repo/test/e2e/configs/labels -e METRICS_EXTRA_LABELS_FILE_EXCLUDE=pod-template-hash \
     -e HANDLE_PREEMPTION=true -e METADATA_URL=http://127.0.0.1:18080/preempted \
-    -e ENVOY_DRAIN_URL=http://127.0.0.1:18080/drain -- -envoy-drain
+    -e ENVOY_DRAIN_URL=http://127.0.0.1:18080/drain -e VMAGENT_PUSH_URL=http://127.0.0.1:18080/api/v1/import/prometheus \
+    -- -envoy-drain
+  # events are JSON lines on stdout
   # shellcheck disable=SC2329 # called through eval
-  events() { docker exec pw-fake curl -s localhost:18080/events; }
+  events() { logs | grep '^{"_emitter":"process-wrapper"'; }
+  # shellcheck disable=SC2329 # called through eval
+  vmagent() { docker exec pw-fake curl -s localhost:18080/vmagent; }
   waitcheck "restart event" 20 eval 'events | grep "\"name\":\"restart\"" | grep -q "\"process_name\":\"evt\""'
   check "readiness failure event" eval 'events | grep -q "\"name\":\"readiness\""'
-  check "initial preempted metric" eval 'events | grep "\"name\":\"preempted\"" | grep -q "\"op\":\"inc\""'
   check "env labels (HOSTNAME, POD_NAMESPACE, NODE_NAME)" eval 'events | grep "\"name\":\"restart\"" | grep "\"pod\":\"pod-e2e\"" | grep "\"namespace\":\"ns-e2e\"" | grep -q "\"node\":\"node-e2e\""'
   check "METRICS_JSON_EXTRA_LABELS" eval 'events | grep "\"name\":\"restart\"" | grep -q "\"k8s_cluster\":\"e2e\""'
   check "METRICS_EXTRA_LABELS_FILE_PATH (dashes replaced)" eval 'events | grep "\"name\":\"restart\"" | grep "\"app_name\":\"web\"" | grep -q "\"team\":\"core\""'
   check "METRICS_EXTRA_LABELS_FILE_EXCLUDE" eval '! events | grep -q pod_template_hash'
+  waitcheck "initial preempted 0 pushed to VMAgent" 10 eval 'vmagent | grep "^preempted{" | grep "pod=\"pod-e2e\"" | grep -q " 0$"'
   x touch /tmp/evt.ready
   waitcheck "ready before preemption" 10 ready
   docker exec pw-fake curl -s -X POST localhost:18080/preempt >/dev/null
@@ -415,7 +434,7 @@ suite_events() {
   check "liveness keeps passing after preemption" code 200 localhost:8111/liveness
   check "preemption logged" has_log 'Node is preempted'
   waitcheck "-envoy-drain calls ENVOY_DRAIN_URL" 10 eval '[ "$(docker exec pw-fake curl -s localhost:18080/drains)" -ge 1 ]'
-  check "preempted event" eval 'events | grep "\"name\":\"preempted\"" | grep -q "\"op\":\"event\""'
+  check "preempted 1 pushed to VMAgent" eval 'vmagent | grep "^preempted{" | grep -q " 1$"'
   stop_with TERM >/dev/null
   check "termination event" eval 'events | grep "\"name\":\"termination\"" | grep -q "\"signal\":\"termination\""'
   finish
@@ -427,9 +446,9 @@ suite_credential() {
   # the wrapper as root (with the capabilities to switch users and signal them)
   start cred test/e2e/configs/credential.yaml --user 0 --cap-add SETUID --cap-add SETGID --cap-add KILL
   waitcheck "ready" 15 ready
-  check "process runs with sysProcAttr.credential" file_is /tmp/cred.proc 65532
-  check "exec probe runs with the process credential" file_is /tmp/cred.probe 65532
-  check "postStart hook runs with the process credential" file_is /tmp/cred.hook 65532
+  check "process runs with sysProcAttr.credential" file_is /tmp/cred.proc 1010
+  check "exec probe runs with the process credential" file_is /tmp/cred.probe 1010
+  check "postStart hook runs with the process credential" file_is /tmp/cred.hook 1010
   check "wrapper itself runs as root" eval '[ "$(x sh -c "stat -c %u /proc/1")" = 0 ]'
   stop_with TERM >/dev/null
   check "root wrapper stops the process" exit_code 0
@@ -458,6 +477,37 @@ suite_hardening() {
   waitcheck "flooding postStart hook killed" 25 has_log 'hook was killed, output exceeds'
   sleep 3
   check "--init: no zombies left" eval '! x sh -c "grep -l \"^State:.*Z\" /proc/[0-9]*/status" | grep -q .'
+  finish
+}
+
+suite_lifecycle() {
+  local secs
+  start job test/e2e/configs/job.yaml
+  waitcheck "isJob: completed job logged" 10 has_log 'Job completed'
+  sleep 3
+  check "isJob: completed job not restarted" eval '[ $(count_log "msg=\"migrated") = 1 ]'
+  check "isJob: wrapper keeps running" eval 'running && get -f "localhost:8111/pidof?name=app"'
+  finish
+
+  start job-fail test/e2e/configs/job-fail.yaml
+  waitcheck "isJob: failed job stops the wrapper" 15 stopped
+  check "isJob: exit code 1" exit_code 1
+  check "isJob: failure logged" has_log 'Job failed'
+  finish
+
+  start never test/e2e/configs/restart-never.yaml
+  waitcheck "restartPolicy: never logged" 10 has_log "Restart policy is 'never'"
+  sleep 3
+  check "restartPolicy: never not restarted" eval '[ $(count_log "msg=\"once-ran") = 1 ] && running'
+  finish
+
+  start backoff test/e2e/configs/backoff.yaml
+  waitcheck "restartBackoff grows exponentially up to maxDelay" 15 eval \
+    'has_log "Restart command in 200ms (failures=1)" && has_log "Restart command in 400ms (failures=2)" &&
+     has_log "Restart command in 800ms (failures=3)" && has_log "Restart command in 1s (failures=4)"'
+  check "restart back-off metric" metric 'sidecar_cmd_restart_backoff_seconds{process_name="crash"'
+  secs=$(stop_with TERM)
+  check "SIGTERM interrupts the back-off ($secs s)" eval "[ $secs -le 3 ] && exit_code 0"
   finish
 }
 
@@ -497,18 +547,15 @@ suite_amqp() {
   waitcheck "reuseConn: ready" 20 ready
   check "reuseConn: one connection kept" eval '[ "$(docker exec -u rabbitmq pw-rabbitmq rabbitmqctl -q list_connections | grep -c .)" -ge 1 ]'
   docker exec -u rabbitmq pw-rabbitmq rabbitmqctl -q close_all_connections e2e >/dev/null
-  waitcheck "reuseConn: closed connection detected" 10 has_log 'Reset amqp probe connection'
+  waitcheck "reuseConn: closed connection detected" 10 has_log 'reset amqp probe connection'
   waitcheck "reuseConn: reconnects" 10 ready
   finish
 }
 
 suite_lock() {
-  need etcd
-  docker run -d --name pw-lock --network container:pw-netns --read-only --cap-drop ALL \
-    -e SHARED_LEASE_SOCKET=:8191 -e SHARED_LEASE_ETCD_ENDPOINTS=localhost:2379 $TIMG process-wrapper -shared-lock >/dev/null
-  CUR=pw-lock
-  waitcheck "lock server up" 15 code 200 localhost:8191/health
-  check "lock server: /debug/vars not exposed" code 404 localhost:8191/debug/vars
+  # the fake shared lock server (API of github.com/tentens-tech/shared-lock) listens
+  # on the default -shared-lock-url http://localhost:8191 and on :18080
+  need fake
   start lock-a examples/shared-lock.yaml; local a=$CUR
   waitcheck "first instance acquires the lock and is ready" 30 ready
   check "acquire lock metric" metric 'sidecar_cmd_acquire_lock_total'
@@ -523,56 +570,11 @@ suite_lock() {
   start lockprom examples/prommerge-shared-lock.yaml
   waitcheck "prommerge + lock" 30 eval 'get localhost:8111/prommerge | grep -q "process_name=\"singleton\""'
   finish
-  finish pw-lock
-
-  # a lock server on a non-default address
-  docker run -d --name pw-lock2 --network container:pw-netns --read-only --cap-drop ALL \
-    -e SHARED_LEASE_SOCKET=:8192 -e SHARED_LEASE_ETCD_ENDPOINTS=localhost:2379 $TIMG process-wrapper -shared-lock >/dev/null
-  start lock-url test/e2e/configs/lock-url.yaml -- -shared-lock-url http://localhost:8192
+  start lock-url test/e2e/configs/lock-url.yaml -- -shared-lock-url http://127.0.0.1:18080
   waitcheck "-shared-lock-url" 30 ready
-  finish; finish pw-lock2
-}
-
-suite_lock-tls() {
-  local certs=$LOGDIR/certs
-  rm -rf "$certs"; mkdir -p "$certs"
-  docker run --rm -v "$certs:/certs" alpine:3.24 sh -ec '
-    apk add -q --no-cache openssl
-    cd /certs
-    openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.crt -days 1 -subj /CN=e2e-ca 2>/dev/null
-    printf "subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth,clientAuth\n" > ext
-    for n in server tls; do
-      openssl req -newkey rsa:2048 -nodes -keyout $n.key -out $n.csr -subj /CN=e2e-$n 2>/dev/null
-      openssl x509 -req -in $n.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out $n.crt -days 1 -extfile ext 2>/dev/null
-    done
-    chmod 644 *' || { bad "certificates generated"; return; }
-  docker run -d --name pw-etcd-tls --network container:pw-netns -v "$certs:/certs:ro" gcr.io/etcd-development/etcd:v3.6.6 \
-    etcd --name tls --data-dir /tmp/etcd-tls \
-    --listen-client-urls https://127.0.0.1:2479 --advertise-client-urls https://localhost:2479 \
-    --listen-peer-urls http://127.0.0.1:2480 --initial-advertise-peer-urls http://127.0.0.1:2480 \
-    --initial-cluster tls=http://127.0.0.1:2480 \
-    --cert-file /certs/server.crt --key-file /certs/server.key \
-    --client-cert-auth --trusted-ca-file /certs/ca.crt >/dev/null
-  sleep 3
-
-  # explicit SHARED_LEASE_ETCD_* files
-  docker run -d --name pw-lock-tls --network container:pw-netns --read-only --cap-drop ALL -v "$certs:/certs:ro" \
-    -e SHARED_LEASE_SOCKET=:8193 -e SHARED_LEASE_ETCD_ENDPOINTS=localhost:2479 \
-    -e SHARED_LEASE_ETCD_CA_CERT=/certs/ca.crt -e SHARED_LEASE_ETCD_CLIENT_CERT=/certs/tls.crt \
-    -e SHARED_LEASE_ETCD_CLIENT_KEY=/certs/tls.key $TIMG process-wrapper -shared-lock -shared-lock-etcd-tls >/dev/null
-  start lock-tls test/e2e/configs/lock-url.yaml -- -shared-lock-url http://localhost:8193
-  waitcheck "-shared-lock-etcd-tls with SHARED_LEASE_ETCD_* files" 30 ready
-  finish; finish pw-lock-tls
-
-  # client cert and key from the default /cert/tls paths, CA from the env
-  docker run -d --name pw-lock-tls2 --network container:pw-netns --read-only --cap-drop ALL \
-    -v "$certs:/certs:ro" -v "$certs:/cert/tls:ro" \
-    -e SHARED_LEASE_SOCKET=:8194 -e SHARED_LEASE_ETCD_ENDPOINTS=localhost:2479 \
-    -e SHARED_LEASE_ETCD_CA_CERT=/certs/ca.crt $TIMG process-wrapper -shared-lock -shared-lock-etcd-tls >/dev/null
-  start lock-tls2 test/e2e/configs/lock-url.yaml -- -shared-lock-url http://localhost:8194
-  waitcheck "-shared-lock-etcd-tls with default client cert paths" 30 ready
-  finish; finish pw-lock-tls2
-  finish pw-etcd-tls
+  finish
+  finish pw-fake
+  STARTED=${STARTED/ fake / }
 }
 
 # ---------------------------------------------------------------- main

@@ -1,0 +1,15 @@
+- name: "quiet"
+  logs: false
+  entrypoint: "sh"
+  args: ["-c", "echo hidden-line; sleep 3600"]
+- name: "errors-only"
+  logLevels: ["error"]
+  entrypoint: "sh"
+  args: ["-c", "echo 'level=info msg=\"cmd-info\"'; echo 'level=error msg=\"cmd-error\"'; sleep 3600"]
+- name: "global"
+  entrypoint: "sh"
+  args: ["-c", "echo 'level=info msg=\"global-info\"'; echo 'level=warning msg=\"global-warning\"'; echo 'level=debug msg=\"global-debug\"'; sleep 3600"]
+- name: "auto"
+  logFormat: "auto"
+  entrypoint: "sh"
+  args: ["-c", "echo 'auto-info line'; echo 'WARNING auto-warning line'; sleep 3600"]

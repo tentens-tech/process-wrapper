@@ -4,21 +4,22 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/go-logfmt/logfmt"
-	log "github.com/sirupsen/logrus"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"process-wrapper/pkg/lease/handlers"
 	"process-wrapper/pkg/metrics"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/go-logfmt/logfmt"
+	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -46,26 +47,55 @@ var (
 
 // Command represents process entity
 type Command struct {
-	Name          string               `yaml:"name"`
-	Entrypoint    string               `yaml:"entrypoint"`
-	Args          []string             `yaml:"args"`
-	Envs          map[string]string    `yaml:"envs"`
-	EnvsFile      string               `yaml:"envsFile"`
-	RestartPolicy string               `yaml:"restartPolicy"` // Not implemented
-	Readiness     *Probe               `yaml:"readiness"`
-	LogFormat     string               `yaml:"logFormat"`
-	Dir           string               `yaml:"dir"`
-	PromTarget    string               `yaml:"promTarget"`
-	SysProcAttr   *syscall.SysProcAttr `yaml:"sysProcAttr"`
-	Replicas      int                  `yaml:"replicas"`
-	PostStart     *Hook                `yaml:"postStart"`
-	MemoryLimitMB float64              `yaml:"memoryLimitMB"`
+	Name       string            `yaml:"name"`
+	Entrypoint string            `yaml:"entrypoint"`
+	Args       []string          `yaml:"args"`
+	Envs       map[string]string `yaml:"envs"`
+	EnvsFile   string            `yaml:"envsFile"`
+	// RestartPolicy controls whether a terminated command is restarted.
+	// Accepts "always" (default) and "never" — case-insensitive, with the
+	// historical typo "newer" honoured as alias. Empty means "always".
+	RestartPolicy string `yaml:"restartPolicy"`
+	// RestartBackoff configures the exponential back-off delay between
+	// automatic restarts. Optional; missing or zero fields fall back to
+	// package defaults (1s → 2x → 1m, ±20% jitter, 10s success threshold).
+	RestartBackoff *RestartBackoff      `yaml:"restartBackoff"`
+	Readiness      *Probe               `yaml:"readiness"`
+	LogFormat      string               `yaml:"logFormat"`
+	Dir            string               `yaml:"dir"`
+	PromTarget     string               `yaml:"promTarget"`
+	SysProcAttr    *syscall.SysProcAttr `yaml:"sysProcAttr"`
+	Replicas       int                  `yaml:"replicas"`
+	PostStart      *Hook                `yaml:"postStart"`
+	MemoryLimitMB  float64              `yaml:"memoryLimitMB"`
+	// IsJob marks a command that runs to completion: it isn't restarted after
+	// exit code 0, a non-zero exit code stops process-wrapper with exit code 1
+	IsJob bool `yaml:"isJob"`
+	// Logs: false disables forwarding of stdout/stderr of the command
+	Logs *bool `yaml:"logs"`
+	// LogLevels is a per-command allow-list of log levels forwarded from the
+	// child process stdout/stderr. Supported values: "debug", "info",
+	// "warning" (alias "warn"), "error". Empty/nil falls back to the global
+	// LOG_LEVELS env; if both are empty the filter is disabled. The filter
+	// applies only to logfmt-parsed levels and to LOG_FORMAT=auto severity
+	// detection; LOG_FORMAT=free/plain is not affected.
+	LogLevels []string `yaml:"logLevels"`
 	// TerminationGracePeriod is the time between SIGTERM and SIGKILL when the
 	// process is restarted by a failed probe or postStart hook (default 10s)
 	TerminationGracePeriod Duration `yaml:"terminationGracePeriod"`
 	// startBackoff is the current delay between failed start attempts
 	startBackoff time.Duration
-	s            *State
+	// backoff tracks the restart back-off across restarts, per replica.
+	// Lazy-initialised by backoffStateOf() — never access this field directly.
+	backoff *backoffState
+	s       *State
+}
+
+// LogsEnabled reports whether stdout/stderr of the child process should be
+// forwarded. When Logs is unset (nil) or explicitly true, logging is enabled;
+// logs: false disables stdout/stderr forwarding for this command only.
+func (c *Command) LogsEnabled() bool {
+	return c.Logs == nil || *c.Logs
 }
 
 // Probe represents health check
@@ -86,6 +116,7 @@ type Probe struct {
 	FloatingPid      *FloatingPid `yaml:"floatingPid"`
 	HeartBeat        *HeartBeat   `yaml:"heartBeat"`
 	AMQP             *AMQPProbe   `yaml:"amqp"`
+	DNS              *DNSProbe    `yaml:"dns"`
 	KeepSharedLock   *LockProbe   `yaml:"lock" json:"lock"`
 }
 
@@ -103,8 +134,12 @@ func (p *Probe) clone() *Probe {
 	}
 	if p.AMQP != nil {
 		amqp := *p.AMQP
-		amqp.connection = nil
+		amqp.conn = nil
 		c.AMQP = &amqp
+	}
+	if p.DNS != nil {
+		dns := *p.DNS
+		c.DNS = &dns
 	}
 	if p.FloatingPid != nil {
 		fp := *p.FloatingPid
@@ -131,6 +166,7 @@ func (p *Probe) ProbesUndefined() bool {
 		p.FloatingPid == nil &&
 		p.HeartBeat == nil &&
 		p.AMQP == nil &&
+		p.DNS == nil &&
 		p.KeepSharedLock == nil {
 		return true
 	}
@@ -148,6 +184,7 @@ func (c *Command) replica(r int, s *State) *Command {
 		Envs:                   c.Envs,
 		EnvsFile:               c.EnvsFile,
 		RestartPolicy:          c.RestartPolicy,
+		RestartBackoff:         c.RestartBackoff,
 		Readiness:              c.Readiness.clone(),
 		LogFormat:              c.LogFormat,
 		Dir:                    c.Dir,
@@ -156,6 +193,9 @@ func (c *Command) replica(r int, s *State) *Command {
 		PostStart:              c.PostStart.clone(),
 		MemoryLimitMB:          c.MemoryLimitMB,
 		TerminationGracePeriod: c.TerminationGracePeriod,
+		IsJob:                  c.IsJob,
+		Logs:                   c.Logs,
+		LogLevels:              c.LogLevels,
 		s:                      s,
 	}
 }
@@ -284,13 +324,21 @@ func (c *Command) ConvertEnvs(envsMap map[string]string) []string {
 	return envList
 }
 
+// Lease is the request body of the shared lock server lease endpoint
+type Lease struct {
+	Key     string            `json:"key"`
+	Value   string            `json:"value"`
+	Labels  map[string]string `json:"labels"`
+	Created time.Time         `json:"timestamp"`
+}
+
 // CreateLease sends a POST request to create a lease and returns the lease ID
 func (c *Command) CreateLease(ttlDuration string) (string, error) {
 	var err error
 	var data []byte
 	url := SharedLockURL + DefaultSharedLockLeaseEndpoint
 
-	lease := handlers.Lease{
+	lease := Lease{
 		Key:   c.Name,
 		Value: "",
 		Labels: map[string]string{
@@ -307,7 +355,7 @@ func (c *Command) CreateLease(ttlDuration string) (string, error) {
 		},
 		Created: time.Now().UTC(),
 	}
-	data, err = lease.ToJSON()
+	data, err = json.Marshal(lease)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal lease to json, %v", err)
 	}
@@ -416,19 +464,26 @@ func (c *Command) runOnce(ctx context.Context) bool {
 		cmd.Dir = c.Dir
 	}
 
-	var stdout, stderr io.ReadCloser
-	stdout, err = cmd.StdoutPipe()
-	if err != nil {
-		return c.startFailed(ctx, preStartLogger, fmt.Errorf("cannot connect command stdout, %w", err))
+	// logs: false leaves stdout/stderr unset, os/exec connects them to os.DevNull
+	logsEnabled := c.LogsEnabled()
+	var stdoutReader, stderrReader *bufio.Reader
+	if logsEnabled {
+		var stdout, stderr io.ReadCloser
+		stdout, err = cmd.StdoutPipe()
+		if err != nil {
+			return c.startFailed(ctx, preStartLogger, fmt.Errorf("cannot connect command stdout, %w", err))
+		}
+		defer stdout.Close()
+		stdoutReader = bufio.NewReaderSize(stdout, MaxOutputLineBytes)
+		stderr, err = cmd.StderrPipe()
+		if err != nil {
+			return c.startFailed(ctx, preStartLogger, fmt.Errorf("cannot connect command stderr, %w", err))
+		}
+		defer stderr.Close()
+		stderrReader = bufio.NewReaderSize(stderr, MaxOutputLineBytes)
+	} else {
+		preStartLogger.Debugf("Logs disabled for command, stdout/stderr will not be forwarded")
 	}
-	defer stdout.Close()
-	stdoutReader := bufio.NewReaderSize(stdout, MaxOutputLineBytes)
-	stderr, err = cmd.StderrPipe()
-	if err != nil {
-		return c.startFailed(ctx, preStartLogger, fmt.Errorf("cannot connect command stderr, %w", err))
-	}
-	defer stderr.Close()
-	stderrReader := bufio.NewReaderSize(stderr, MaxOutputLineBytes)
 
 	// Own process group: stop signals reach the descendants of the command too
 	cmd.SysProcAttr = groupProcAttr(c.SysProcAttr)
@@ -451,10 +506,16 @@ func (c *Command) runOnce(ctx context.Context) bool {
 	pid := cmd.Process.Pid
 	c.s.SetPid(c.Name, pid)
 	c.s.SetCancelRoutine(c.Name, cancelRoutines)
+	// Arm exactly one back-off reset for this incarnation. The first of
+	// (a) readiness flipping to true or (b) uptime > SuccessThreshold
+	// will fire it; subsequent triggers in the same run are no-ops.
+	c.ArmRestartBackoffReset()
 	postStartLogger := log.WithFields(log.Fields{"name": c.Name, "command": c.String(), "pid": pid})
 
-	go c.ProcessOutput(stdoutReader, pid)
-	go c.ProcessOutput(stderrReader, pid)
+	if logsEnabled {
+		go c.ProcessOutput(stdoutReader, pid)
+		go c.ProcessOutput(stderrReader, pid)
+	}
 
 	postStartLogger.Printf("Run command")
 
@@ -467,7 +528,8 @@ func (c *Command) runOnce(ctx context.Context) bool {
 	postStartLogger.Debugf("Wait command to complete")
 
 	err = cmd.Wait()
-	terminationLogger := log.WithFields(log.Fields{"name": c.Name, "command": c.String(), "pid": pid, "exit_code": cmd.ProcessState.ExitCode()})
+	exitCode := cmd.ProcessState.ExitCode()
+	terminationLogger := log.WithFields(log.Fields{"name": c.Name, "command": c.String(), "pid": pid, "exit_code": exitCode})
 	if err != nil {
 		terminationLogger.Errorf("Command execution error, %v", err)
 	}
@@ -480,21 +542,30 @@ func (c *Command) runOnce(ctx context.Context) bool {
 	}
 	c.s.RemovePid(c.Name, pid)
 
-	// Todo: Implement different restart policy for processes
-	/*
-		if c.RestartPolicy == RestartPolicyNewer {
-			//terminationLogger.Warnf("DO NOT RESTART")
-			cancelRoutines()
-			return
-		}
+	metrics.SidecarCmdDurationSecondsGauge.WithLabelValues(c.Name, fmt.Sprintf("%v", exitCode)).Set(time.Since(startTime).Seconds())
 
-	*/
-	metrics.SidecarCmdDurationSecondsGauge.WithLabelValues(c.Name, fmt.Sprintf("%v", cmd.ProcessState.ExitCode())).Set(time.Since(startTime).Seconds())
+	// restartPolicy: never — the command isn't restarted, even a job
+	if normalizeRestartPolicy(c.RestartPolicy) == RestartPolicyNewer {
+		terminationLogger.Warnf("Restart policy is 'never', do not restart")
+		cancelRoutines()
+		return false
+	}
+
+	// A job that exited by itself isn't restarted, a failed job stops the wrapper
+	if c.IsJob && !c.s.IsKilled(c.Name) {
+		cancelRoutines()
+		if exitCode != 0 {
+			terminationLogger.Errorf("Job failed, time %v", time.Since(startTime))
+			jobFailed(1)
+		}
+		terminationLogger.Printf("Job completed, time %v", time.Since(startTime))
+		return false
+	}
 
 	// Do not restart process if command not killed by health checker and graceful shutdown in progress
 	if !c.s.IsKilled(c.Name) && c.s.IsShutdown() {
 		terminationLogger.Printf("Command completed with code %v, time %v",
-			cmd.ProcessState.ExitCode(), time.Since(startTime))
+			exitCode, time.Since(startTime))
 		cancelRoutines()
 		return false
 	}
@@ -502,15 +573,31 @@ func (c *Command) runOnce(ctx context.Context) bool {
 	// Restart command if exit code or HealthChecker routine/Memory limit handler killed the process
 	if !c.s.IsShutdown() || c.s.IsKilled(c.Name) {
 		c.s.SetKillState(c.Name, false)
-		terminationLogger.Warnf("Restart command")
-		metrics.SidecarCmdReadinessCount.WithLabelValues("restart", c.Name, c.Entrypoint).Inc()
-		time.Sleep(time.Second)
+		// Stop HealthChecker/GetStats before the back-off: it may be long
 		cancelRoutines()
+
+		if time.Since(startTime) >= c.ResolveBackoff().SuccessThreshold.Duration {
+			c.ResetRestartBackoff("uptime")
+		}
+		delay := c.NextRestartDelay()
+		failures := c.FailureCount()
+		terminationLogger.WithFields(log.Fields{"backoff": delay.String(), "failures": failures}).
+			Warnf("Restart command in %v (failures=%d)", delay, failures)
+		metrics.SidecarCmdReadinessCount.WithLabelValues("restart", c.Name, c.Entrypoint).Inc()
+
+		// SIGTERM during a long back-off must not stall graceful shutdown
+		if !sleepCtx(ctx, delay) {
+			terminationLogger.Warnf("Context cancelled during restart back-off, aborting restart")
+			return false
+		}
 		return !c.s.IsShutdown()
 	}
 	cancelRoutines()
 	return false
 }
+
+// jobFailed stops process-wrapper when a job fails, replaced in tests
+var jobFailed = os.Exit
 
 // PostStartHookRunner executes a hook command and sets the status to the state
 func (c *Command) PostStartHookRunner(ctx context.Context, envs map[string]string) bool {
@@ -566,6 +653,10 @@ func (c *Command) HealthChecker(ctxRoutines context.Context, cancelRoutines cont
 	c.SetReadinessDelay(logger)
 	c.SetReadinessPeriod(logger)
 	c.SetReadinessFailureThreshold(logger)
+	// The DNS probe compares addresses with the ones of this process run
+	if c.Readiness.DNS != nil {
+		c.Readiness.DNS.reset()
+	}
 
 	log.Debugf("Readiness Delay: %v", c.Readiness.Delay)
 	log.Debugf("Readiness Period: %v", c.Readiness.Period)
@@ -599,51 +690,55 @@ func (c *Command) ProbeRunner(ctx context.Context, cancelRoutines context.Cancel
 				return
 			}
 			if c.Readiness.HTTP != nil {
-				s := HealthRun(c.Name, c.Readiness.HTTP, c.s.M)
+				s := HealthRun(c.Name, c.Readiness.HTTP)
 				status = append(status, s)
 			}
 			if c.Readiness.TCP != nil {
-				s := HealthRun(c.Name, c.Readiness.TCP, c.s.M)
+				s := HealthRun(c.Name, c.Readiness.TCP)
 				status = append(status, s)
 			}
 			if c.Readiness.File != nil {
-				s := HealthRun(c.Name, c.Readiness.File, c.s.M)
+				s := HealthRun(c.Name, c.Readiness.File)
 				status = append(status, s)
 			}
 			if c.Readiness.Env != nil {
-				s := HealthRun(c.Name, c.Readiness.Env, c.s.M)
+				s := HealthRun(c.Name, c.Readiness.Env)
 				status = append(status, s)
 			}
 			if c.Readiness.Exec != nil {
-				s := HealthRun(c.Name, c.Readiness.Exec.For(c), c.s.M)
+				s := HealthRun(c.Name, c.Readiness.Exec.For(c))
 				status = append(status, s)
 			}
 			if c.Readiness.SQL != nil {
 				c.Readiness.SQL.Envs = envs
-				s := HealthRun(c.Name, c.Readiness.SQL, c.s.M)
+				s := HealthRun(c.Name, c.Readiness.SQL)
 				status = append(status, s)
 			}
 			if c.Readiness.FloatingPid != nil {
 				if c.Readiness.FloatingPid.State == nil {
 					c.Readiness.FloatingPid.State = c.s
 				}
-				s := HealthRun(c.Name, c.Readiness.FloatingPid, c.s.M)
+				s := HealthRun(c.Name, c.Readiness.FloatingPid)
 				status = append(status, s)
 			}
 			if c.Readiness.HeartBeat != nil {
 				if c.Readiness.HeartBeat.State == nil {
 					c.Readiness.HeartBeat.State = c.s
 				}
-				s := HealthRun(c.Name, c.Readiness.HeartBeat, c.s.M)
+				s := HealthRun(c.Name, c.Readiness.HeartBeat)
 				status = append(status, s)
 			}
 			if c.Readiness.AMQP != nil {
 				c.Readiness.AMQP.Envs = envs
-				s := HealthRun(c.Name, c.Readiness.AMQP, c.s.M)
+				s := HealthRun(c.Name, c.Readiness.AMQP)
+				status = append(status, s)
+			}
+			if c.Readiness.DNS != nil {
+				s := HealthRun(c.Name, c.Readiness.DNS)
 				status = append(status, s)
 			}
 			if c.Readiness.KeepSharedLock != nil {
-				s := HealthRun(c.Name, c.Readiness.KeepSharedLock, c.s.M)
+				s := HealthRun(c.Name, c.Readiness.KeepSharedLock)
 				status = append(status, s)
 			}
 			if c.Readiness.ProbesUndefined() {
@@ -672,7 +767,7 @@ func (c *Command) ProbeRunner(ctx context.Context, cancelRoutines context.Cancel
 				logger.Warnf("Probe failure count %v, unhealthy probes %v", failureThreshold, unhealthy)
 				if failureThreshold >= c.Readiness.FailureThreshold {
 					logger.Warnf("Exceeded failure threshold, restart command, %v", c.Entrypoint)
-					c.s.M.PushCommandRestartEvent(map[string]string{
+					metrics.PushCommandRestartEvent(map[string]string{
 						"command":      c.Entrypoint,
 						"process_name": c.Name,
 						"event_type":   "restart",
@@ -856,32 +951,46 @@ func (c *Command) logOutputLine(out, logFormat string, pid int) {
 	}
 	level, message = getMessage(out)
 
+	// logLevels / LOG_LEVELS allow-list, an empty set disables the filter
+	levels := effectiveLogLevels(c.LogLevels)
+
 	if level == "unknown" {
 		switch logFormat {
 		case "free", "plain":
 			fmt.Printf("%v", out)
 		case "auto":
-			if strings.Contains(out, "CRITICAL") || strings.Contains(out, "ERROR") {
-				log.WithFields(log.Fields{"name": c.Name, "pid": pid, "out": "stdout"}).Errorf("%v", out)
+			emit, autoLevel := shouldEmit(levels, level, logFormat, out)
+			if !emit {
 				return
 			}
-			if strings.Contains(out, "WARNING") {
-				log.WithFields(log.Fields{"name": c.Name, "pid": pid, "out": "stdout"}).Warnf("%v", out)
-				return
+			logger := log.WithFields(log.Fields{"name": c.Name, "pid": pid, "out": "stdout"})
+			switch autoLevel {
+			case LogLevelError:
+				logger.Errorf("%v", out)
+			case LogLevelWarning:
+				logger.Warnf("%v", out)
+			default:
+				logger.Printf("%v", out)
 			}
-			log.WithFields(log.Fields{"name": c.Name, "pid": pid, "out": "stdout"}).Printf("%v", out)
 		default:
 			log.WithFields(log.Fields{"name": c.Name, "pid": pid, "out": "stdout"}).Printf("%v", out)
 		}
-	} else {
-		switch level {
-		case "warning":
-			log.WithFields(log.Fields{"name": c.Name, "pid": pid, "severity": level}).Warnf("%v", message)
-		case "error":
-			log.WithFields(log.Fields{"name": c.Name, "pid": pid, "severity": level}).Errorf("%v", message)
-		default:
-			log.WithFields(log.Fields{"name": c.Name, "pid": pid, "severity": level}).Printf("%v", message)
-		}
+		return
+	}
+
+	if emit, _ := shouldEmit(levels, level, logFormat, out); !emit {
+		return
+	}
+	logger := log.WithFields(log.Fields{"name": c.Name, "pid": pid, "severity": level})
+	switch normalizeLevel(level) {
+	case LogLevelWarning:
+		logger.Warnf("%v", message)
+	case LogLevelError:
+		logger.Errorf("%v", message)
+	case LogLevelDebug:
+		logger.Debugf("%v", message)
+	default:
+		logger.Printf("%v", message)
 	}
 }
 

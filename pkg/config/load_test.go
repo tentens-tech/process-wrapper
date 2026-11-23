@@ -31,6 +31,19 @@ func checkAllFields(t *testing.T, commands []process.Command) {
 	eq("envs", c.Envs, map[string]string{"PORT": "8080"})
 	eq("envsFile", c.EnvsFile, "/etc/app/envs")
 	eq("restartPolicy", c.RestartPolicy, "Always")
+	if c.RestartBackoff == nil {
+		t.Fatal("restartBackoff is not parsed")
+	}
+	eq("restartBackoff", *c.RestartBackoff, process.RestartBackoff{
+		InitialDelay:     process.Duration{Duration: 2 * time.Second},
+		MaxDelay:         process.Duration{Duration: 30 * time.Second},
+		Multiplier:       3,
+		SuccessThreshold: process.Duration{Duration: 20 * time.Second},
+		Jitter:           0.1,
+	})
+	eq("isJob", c.IsJob, true)
+	eq("logs", c.LogsEnabled(), false)
+	eq("logLevels", c.LogLevels, []string{"warning", "error"})
 	eq("logFormat", c.LogFormat, "auto")
 	eq("replicas", c.Replicas, 2)
 	eq("memoryLimitMB", c.MemoryLimitMB, 512.5)
@@ -50,7 +63,7 @@ func checkAllFields(t *testing.T, commands []process.Command) {
 	eq("readiness.startupDeadline", r.StartupDeadline.Duration, 3*time.Minute)
 	eq("readiness.failureThreshold", r.FailureThreshold, 4)
 	if r.HTTP == nil || r.TCP == nil || r.File == nil || r.Env == nil || r.Exec == nil || r.SQL == nil ||
-		r.AMQP == nil || r.FloatingPid == nil || r.HeartBeat == nil || r.KeepSharedLock == nil {
+		r.AMQP == nil || r.FloatingPid == nil || r.HeartBeat == nil || r.KeepSharedLock == nil || r.DNS == nil {
 		t.Fatalf("not every probe is parsed: %+v", r)
 	}
 	eq("http.url", r.HTTP.URL, "http://localhost:8080/health")
@@ -64,6 +77,9 @@ func checkAllFields(t *testing.T, commands []process.Command) {
 	eq("sql.queries", r.SQL.Queries, []string{"SELECT 1"})
 	eq("sql.contains", r.SQL.Contains, []string{"1"})
 	eq("amqp.reuseConn", r.AMQP.ReuseConn, true)
+	eq("amqp.operationsTimeout", r.AMQP.OperationsTimeout.Duration, 7*time.Second)
+	eq("amqp.tlsInsecureSkipVerify", r.AMQP.TLSInsecureSkipVerify, true)
+	eq("dns.url", r.DNS.URL, "rabbitmq")
 	eq("floatingPid.period", r.FloatingPid.Period.Duration, 20*time.Second)
 	eq("floatingPid.threshold", r.FloatingPid.Threshold, 2)
 	eq("heartBeat.period", r.HeartBeat.Period.Duration, 45*time.Second)
@@ -128,5 +144,18 @@ func TestJSONEnvInvalid(t *testing.T) {
 func TestFileLoadMissingFile(t *testing.T) {
 	if commands := (File{Path: filepath.Join(t.TempDir(), "nope.yaml")}).Load(); len(commands) != 0 {
 		t.Errorf("missing file must produce no commands, got %+v", commands)
+	}
+}
+
+// Every example config must load
+func TestExamplesLoad(t *testing.T) {
+	files, err := filepath.Glob("../../examples/*.yaml")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no examples found, %v", err)
+	}
+	for _, f := range files {
+		if commands := (File{Path: f}).Load(); len(commands) == 0 {
+			t.Errorf("%v: no commands loaded", f)
+		}
 	}
 }

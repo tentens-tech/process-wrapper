@@ -4,14 +4,11 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"github.com/grafana/pyroscope-go"
-	log "github.com/sirupsen/logrus"
 	"net/http"
 	"os"
 	"process-wrapper/pkg/config"
-	"process-wrapper/pkg/lease/handlers"
-	"process-wrapper/pkg/lease/lock"
 	"process-wrapper/pkg/metrics"
+	"process-wrapper/pkg/phpscope"
 	"process-wrapper/pkg/process"
 	"process-wrapper/pkg/prommerge"
 	"process-wrapper/pkg/signals"
@@ -20,6 +17,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	pyroscope "github.com/grafana/pyroscope-go"
+	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -40,11 +40,12 @@ var (
 	readinessFile            string
 	pidFile                  string
 	pyroscopeURL             string
+	phpPyroscopeURL          string
+	phpAppName               string
+	phpRateHz                int
 	sharedLockURL            string
 	debug                    bool
 	wait                     bool
-	sharedLock               bool
-	sharedLockEtcdTLS        bool
 	printVersion             bool
 	envoyDrain               bool
 	promMergeEmptyOnFailure  bool
@@ -62,29 +63,25 @@ func printEnv() {
 	envs := `
 Environment Variables:
   CONFIG: process-wrapper configuration in JSON format
-  POD_NAMESPACE: must be set in config to handle fast sidecar termination, and to enrich loki events by namespace label
-  NODE_NAME: must be set in config to enrich events with labels send to metrics-server
+  POD_NAMESPACE: must be set in config to handle fast sidecar termination, and to enrich events by namespace label
+  NODE_NAME: must be set in config to enrich events with a node label
   HANDLE_PREEMPTION: handle google cloud preemption events gracefully
   HEALTH_SOCKET: http server socket which handles /readiness, /liveness, /prommerge endpoints, (default ":8111")
-  ENVOY_DRAIN_URL: make request to envoy admin url to [drain listener](https://www.envoyproxy.io/docs/envoy/latest/operations/admin#post--drain_listeners) connections, default is http://localhost:15000/drain_listeners
-  METADATA_URL: google metadata url, default is http://metadata.google.internal/computeMetadata/v1/instance/preempted
+  ENVOY_DRAIN_URL: make request to envoy admin url to [drain listener](https://www.envoyproxy.io/docs/envoy/latest/operations/admin#post--drain_listeners) connections, default is http://localhost:15000/drain_listeners?inboundonly
+  METADATA_URL: google metadata url, default: gke-metadata-server on $NODE_NAME:9889, then http://metadata.google.internal/computeMetadata/v1/instance/preempted
   HANDLE_TERMINATION: enable status checking for other containers within the pod
-  METRICS_SERVER_ADDRESS: metrics-server udp address to send metric events like preemption, restart, probe failure
   METRICS_JSON_EXTRA_LABELS: extra labels in JSON format, e.g {\"k8s_cluster\":\"test\"}
   METRICS_EXTRA_LABELS_FILE_PATH: extra pod labels mounted from kubernetes downwardAPI
   METRICS_EXTRA_LABELS_FILE_EXCLUDE: exclude some pod labels separated by comma, e.g. pod-template-hash,security.istio.io/tlsMode
+  VMAGENT_PUSH_URL: vmagent import url for the preempted metric, default is http://vmagent-vmagent.monitoring.svc.cluster.local:8429/api/v1/import/prometheus
   LOG_FORMAT: LOG_FORMAT=free, disable logfmt format; LOG_FORMAT=auto, autodetect severity level
-  SHARED_LEASE_SOCKET: shared lock server socket, e.g. ':8191'
-  SHARED_LEASE_ETCD_ENDPOINTS: etcd endpoints for shared-lease server, e.g. 'localhost:2379'
-  SHARED_LEASE_ETCD_CA_CERT: path to CA certificate, (default "%v")
-  SHARED_LEASE_ETCD_CLIENT_CERT: path to client certificate, (default "%v")
-  SHARED_LEASE_ETCD_CLIENT_KEY: path to client key, (default "%v")
+  LOG_LEVELS: comma-separated allow-list of log levels forwarded from child processes, e.g. LOG_LEVELS=warning,error (supports debug, info, warning/warn, error/err). Applies to logfmt and LOG_FORMAT=auto; per-command 'logLevels' overrides this env
   AMQP_PROBE_RABBITMQ_DSN_TEMPLATE: amqp probe dsn template, e.g. 'amqp://%%v:%%v@localhost:5672'
   AMQP_PROBE_RABBITMQ_USER: amqp probe user 'guest'
   AMQP_PROBE_RABBITMQ_PASS: amqp probe password, e.g. 'guest'
 
 `
-	fmt.Printf("%v", fmt.Sprintf(envs, lock.DefaultCaCertPath, lock.DefaultClientCertPath, lock.DefaultClientKeyPath))
+	fmt.Print(strings.ReplaceAll(envs, "%%", "%"))
 }
 
 func initFlags() {
@@ -94,11 +91,12 @@ func initFlags() {
 	flag.StringVar(&readinessFile, "readiness-file", ReadinessFile, "readiness file path")
 	flag.StringVar(&pidFile, "pid-file", PidFile, "pid file path, written when process-wrapper is not PID 1 (empty disables it)")
 	flag.StringVar(&pyroscopeURL, "pyroscope-url", "", "pyroscope profiler address, e.g. http://localhost:4040")
+	flag.StringVar(&phpPyroscopeURL, "php-pyroscope-url", "", "pyroscope URL for PHP profiling via phpscope/phpspy; empty disables it")
+	flag.StringVar(&phpAppName, "php-app-name", "", "pyroscope application name for PHP profiling (default: $POD_NAMESPACE.$HOSTNAME)")
+	flag.IntVar(&phpRateHz, "php-rate-hz", 400, "phpspy sampling rate in Hz")
 	flag.StringVar(&sharedLockURL, "shared-lock-url", DefaultSharedLockURL, "shared-lock server url, e.g. http://localhost:8191")
 	flag.BoolVar(&debug, "debug", false, "enable debug")
 	flag.BoolVar(&wait, "wait", false, "wait readiness")
-	flag.BoolVar(&sharedLock, "shared-lock", false, "shared lock server")
-	flag.BoolVar(&sharedLockEtcdTLS, "shared-lock-etcd-tls", false, "use tls transport for etcd")
 	flag.BoolVar(&printVersion, "version", false, "prints version")
 	flag.BoolVar(&envoyDrain, "envoy-drain", false, "drain envoy listeners in case of preemption")
 	flag.BoolVar(&promMergeEmptyOnFailure, "prommerge-empty-on-failure", false, "return empty metric list if one of the targets failed")
@@ -182,24 +180,7 @@ func main() {
 	if pyroscopeURL != "" {
 		Pyroscope()
 	}
-	if sharedLock {
-		err := SharedLockServer()
-		if err != nil {
-			log.Fatalln(err)
-		}
-		os.Exit(0)
-	}
 	StartProcessWrapper()
-}
-
-func SharedLockServer() error {
-	socket := os.Getenv("SHARED_LEASE_SOCKET")
-	etcdEndpoints := os.Getenv("SHARED_LEASE_ETCD_ENDPOINTS")
-	etcdCaCert := os.Getenv("SHARED_LEASE_ETCD_CA_CERT")
-	etcdClientCert := os.Getenv("SHARED_LEASE_ETCD_CLIENT_CERT")
-	etcdClientKey := os.Getenv("SHARED_LEASE_ETCD_CLIENT_KEY")
-	err := handlers.LeaseController(socket, etcdEndpoints, etcdCaCert, etcdClientCert, etcdClientKey, sharedLockEtcdTLS)
-	return err
 }
 
 func WaitReadiness() error {
@@ -235,6 +216,15 @@ func StartProcessWrapper() {
 	go n.Notify()
 	// NewPodStatus starts the pod status controller itself
 	_ = process.NewPodStatus(cancel)
+
+	phpCfg := phpscope.Config{
+		PyroscopeURL: phpPyroscopeURL,
+		AppName:      phpAppName,
+		RateHz:       phpRateHz,
+	}
+	if phpCfg.Enabled() {
+		go phpscope.Run(ctx, phpCfg)
+	}
 
 	var cfg config.Config
 	if configPath != "" {

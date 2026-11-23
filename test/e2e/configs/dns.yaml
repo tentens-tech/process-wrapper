@@ -1,0 +1,17 @@
+- name: "dns"
+  entrypoint: "sleep"
+  args: ["3600"]
+  readiness:
+    delay: "1s"
+    period: "1s"
+    dns:
+      url: "localhost"
+- name: "dns-fail"
+  entrypoint: "sleep"
+  args: ["3600"]
+  readiness:
+    delay: "1s"
+    period: "1s"
+    failureThreshold: 1000
+    dns:
+      url: "nonexistent.invalid"

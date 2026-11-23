@@ -2,9 +2,10 @@ package process
 
 import (
 	"fmt"
-	log "github.com/sirupsen/logrus"
 	"net"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 const (

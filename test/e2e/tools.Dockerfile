@@ -12,4 +12,4 @@ FROM ${IMAGE}
 USER 0
 RUN apk add --no-cache curl python3
 COPY --from=fake /e2e-fake /usr/local/bin/e2e-fake
-USER 65532:65532
+USER 1010:1010

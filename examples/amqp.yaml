@@ -15,4 +15,7 @@
     period: "3s"
     failureThreshold: 3
     amqp:
-      reuseConn: false          # true: keep the connection open and only check it is alive
+      # The connection and channel are kept open and the probe runs basic.get on
+      # the durable "amqp-probe-queue" queue; reuseConn is deprecated (always on)
+      operationsTimeout: "5s"       # dial, channel, queue declare and get (default 5s)
+      tlsInsecureSkipVerify: false  # amqps:// only, keep certificate verification on

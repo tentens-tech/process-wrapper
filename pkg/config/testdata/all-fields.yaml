@@ -7,6 +7,15 @@
     PORT: "8080"
   envsFile: "/etc/app/envs"
   restartPolicy: "Always"
+  restartBackoff:
+    initialDelay: "2s"
+    maxDelay: "30s"
+    multiplier: 3
+    successThreshold: "20s"
+    jitter: 0.1
+  isJob: true
+  logs: false
+  logLevels: ["warning", "error"]
   logFormat: "auto"
   replicas: 2
   memoryLimitMB: 512.5
@@ -44,6 +53,10 @@
       contains: ["1"]
     amqp:
       reuseConn: true
+      operationsTimeout: "7s"
+      tlsInsecureSkipVerify: true
+    dns:
+      url: "rabbitmq"
     floatingPid:
       period: "20s"
       threshold: 2

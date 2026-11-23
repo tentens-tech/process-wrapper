@@ -1,0 +1,14 @@
+# isJob: a command that runs to completion, e.g. a migration next to the app.
+# Exit code 0: the job is not restarted. Non-zero exit code: process-wrapper
+# stops with exit code 1 (the pod fails). A job killed by the wrapper itself
+# (failed probe, memoryLimitMB) is restarted.
+#
+#   go run . -config examples/job.yaml
+- name: "migrate"
+  isJob: true
+  entrypoint: "sh"
+  args: ["-c", "echo migrating; sleep 2; echo done"]
+
+- name: "app"
+  entrypoint: "sleep"
+  args: ["3600"]

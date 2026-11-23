@@ -2,8 +2,9 @@ package process
 
 import (
 	"fmt"
-	log "github.com/sirupsen/logrus"
 	"os"
+
+	log "github.com/sirupsen/logrus"
 )
 
 type FileProbe struct {

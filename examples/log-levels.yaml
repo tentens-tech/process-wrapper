@@ -1,0 +1,26 @@
+# Output filtering.
+#   logs: false         don't forward stdout/stderr of the process
+#   logLevels: [...]    forward only these levels: debug, info, warning (warn), error;
+#                       overrides the LOG_LEVELS env (comma separated, same values)
+# The filter applies to logfmt lines (level=...) and to logFormat: auto
+# (severity detected by keywords). free/plain output is never filtered.
+#
+#   LOG_LEVELS=warning,error go run . -config examples/log-levels.yaml
+- name: "logfmt"                # filtered by LOG_LEVELS
+  entrypoint: "sh"
+  args: ["-c", "while true; do echo 'level=info msg=\"info\"'; echo 'level=warning msg=\"warning\"'; sleep 2; done"]
+
+- name: "auto"                  # filtered by LOG_LEVELS, levels detected by keywords
+  logFormat: "auto"
+  entrypoint: "sh"
+  args: ["-c", "while true; do echo 'everything is fine'; echo 'ERROR boom'; sleep 2; done"]
+
+- name: "errors-only"
+  logLevels: ["error"]
+  entrypoint: "sh"
+  args: ["-c", "while true; do echo 'level=warning msg=\"dropped\"'; echo 'level=error msg=\"kept\"'; sleep 2; done"]
+
+- name: "quiet"
+  logs: false
+  entrypoint: "sh"
+  args: ["-c", "while true; do echo 'never forwarded'; sleep 2; done"]

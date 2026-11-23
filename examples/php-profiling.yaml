@@ -1,0 +1,23 @@
+# PHP continuous profiling with phpscope/phpspy, sent to Pyroscope.
+#
+# process-wrapper runs /usr/bin/phpscope (which spawns phpspy) next to the
+# supervised processes and restarts it when it exits. It is enabled by flags:
+#
+#   -php-pyroscope-url=http://pyroscope.monitoring.svc.cluster.local:4040
+#   -php-app-name=my-service.php     # default: <pod name prefix>.php
+#   -php-rate-hz=400                 # sampling rate, default 400
+#
+# Requirements:
+#   - the image contains /usr/bin/phpscope and /usr/bin/phpspy; the default
+#     image (deployment/docker/Dockerfile) doesn't ship them, add them in your
+#     own image (e.g. from hiload/phpscope, phpspy built statically);
+#   - the PHP processes are visible: run php-fpm under process-wrapper or use
+#     `shareProcessNamespace: true` on the pod;
+#   - the SYS_PTRACE capability for process-wrapper.
+#
+# Restarts of phpscope are counted in sidecar_phpscope_restarts_total.
+#
+#   go run . -config examples/php-profiling.yaml -php-pyroscope-url=http://localhost:4040
+- name: "php-fpm"
+  entrypoint: "php-fpm"
+  args: ["--nodaemonize"]

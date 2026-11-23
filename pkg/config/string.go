@@ -1,9 +1,10 @@
 package config
 
 import (
+	"process-wrapper/pkg/process"
+
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
-	"process-wrapper/pkg/process"
 )
 
 type String struct {

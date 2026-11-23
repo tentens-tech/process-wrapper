@@ -2,12 +2,14 @@ package signals
 
 import (
 	"context"
-	log "github.com/sirupsen/logrus"
 	"os"
 	"os/signal"
+	"process-wrapper/pkg/metrics"
 	"process-wrapper/pkg/process"
 	"syscall"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 type Notifier struct {
@@ -31,7 +33,7 @@ func (n *Notifier) Notify() {
 	for sig := range sigs {
 		switch sig {
 		case syscall.SIGTERM, syscall.SIGQUIT:
-			n.s.M.PushTerminationEvent(map[string]string{
+			metrics.PushTerminationEvent(map[string]string{
 				"signal": "termination",
 			})
 			log.Warnf("Received %v, graceful shutdown", sig)
@@ -45,14 +47,14 @@ func (n *Notifier) Notify() {
 			log.Printf("Successfully terminated")
 		case syscall.SIGINT:
 			n.s.SetShutdown()
-			n.s.M.PushTerminationEvent(map[string]string{
+			metrics.PushTerminationEvent(map[string]string{
 				"signal": "interrupt",
 			})
 			log.Warnf("Received %v, fast shutdown", sig)
 			n.s.RemoveReadinessFile()
 			n.cancel()
 		case syscall.SIGUSR1, syscall.SIGUSR2:
-			n.s.M.PushTerminationEvent(map[string]string{
+			metrics.PushTerminationEvent(map[string]string{
 				"signal": "usr",
 			})
 			log.Warnf("Received %v, print processes state", sig)
@@ -74,7 +76,7 @@ func (n *Notifier) TerminateProcess() {
 
 func (n *Notifier) ProcessKiller() {
 	time.Sleep(n.gracefulShutdown)
-	n.s.M.PushTerminationEvent(map[string]string{
+	metrics.PushTerminationEvent(map[string]string{
 		"signal": "kill",
 	})
 	log.Warnf("Force kill all hanged processes")

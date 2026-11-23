@@ -2,9 +2,10 @@ package config
 
 import (
 	"encoding/json"
-	log "github.com/sirupsen/logrus"
 	"os"
 	"process-wrapper/pkg/process"
+
+	log "github.com/sirupsen/logrus"
 )
 
 const (

@@ -1,11 +1,12 @@
 package config
 
 import (
-	log "github.com/sirupsen/logrus"
-	"gopkg.in/yaml.v3"
 	"os"
 	"process-wrapper/pkg/process"
 	"strings"
+
+	log "github.com/sirupsen/logrus"
+	"gopkg.in/yaml.v3"
 )
 
 const (
