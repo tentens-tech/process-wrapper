@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"process-wrapper/pkg/lease/handlers"
 	"process-wrapper/pkg/metrics"
 	"strings"
@@ -433,6 +434,11 @@ func (c *Command) runOnce(ctx context.Context) bool {
 	cmd.SysProcAttr = groupProcAttr(c.SysProcAttr)
 	cmd.Cancel = func() error { return SignalGroup(cmd.Process.Pid, syscall.SIGKILL) }
 
+	// Don't take the shared lock for a command that can't start: the other
+	// instances waiting for the lock would never get it while this one retries
+	if err = checkStartable(cmd); err != nil {
+		return c.startFailed(ctx, preStartLogger, err)
+	}
 	c.AcquireSharedLock(ctx)
 
 	preStartLogger.Debugf("Schedule command")
@@ -751,6 +757,31 @@ func (c *Command) startFailed(ctx context.Context, logger *log.Entry, err error)
 	c.startBackoff = min(max(c.startBackoff*2, StartRetryMinDelay), StartRetryMaxDelay)
 	logger.Warnf("Retry command start in %v", c.startBackoff)
 	return sleepCtx(ctx, c.startBackoff) && !c.s.IsShutdown()
+}
+
+// checkStartable reports the start failures that can be found without starting
+// the command: an entrypoint that isn't in PATH or doesn't exist and a missing dir
+func checkStartable(cmd *exec.Cmd) error {
+	if cmd.Err != nil {
+		return cmd.Err
+	}
+	if cmd.Dir != "" {
+		info, err := os.Stat(cmd.Dir)
+		if err != nil {
+			return fmt.Errorf("chdir %v: %w", cmd.Dir, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("chdir %v: not a directory", cmd.Dir)
+		}
+	}
+	path := cmd.Path
+	if !filepath.IsAbs(path) && cmd.Dir != "" {
+		path = filepath.Join(cmd.Dir, path)
+	}
+	if _, err := os.Stat(path); err != nil {
+		return err
+	}
+	return nil
 }
 
 // sleepCtx sleeps for d and returns false if ctx is done earlier

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -259,4 +260,37 @@ func waitDead(t *testing.T, pid int) {
 	t.Helper()
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
 	waitFor(t, "descendant to be killed", func() bool { return syscall.Kill(pid, 0) != nil })
+}
+
+// A command that can't start must not take the shared lock, otherwise the
+// instances waiting for it never run while this one retries the start
+func TestStartFailureDoesNotTakeSharedLock(t *testing.T) {
+	var leases atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		leases.Add(1)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte("1"))
+	}))
+	defer srv.Close()
+	SharedLockURL = srv.URL
+
+	for name, c := range map[string]*Command{
+		"missing entrypoint":     {Entrypoint: "/nonexistent/binary"},
+		"entrypoint not in PATH": {Entrypoint: "nonexistent-binary-e2e"},
+		"missing relative path":  {Entrypoint: "./nonexistent", Dir: t.TempDir()},
+		"missing dir":            {Entrypoint: "true", Dir: "/nonexistent/dir"},
+		"dir is a file":          {Entrypoint: "true", Dir: "/etc/hosts"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newTestState()
+			c.Name, c.s = "app", s
+			c.Readiness = &Probe{KeepSharedLock: &LockProbe{}}
+			if !c.runOnce(context.Background()) {
+				t.Error("start failure must be retried")
+			}
+			if n := leases.Load(); n != 0 {
+				t.Errorf("shared lock requested %v times", n)
+			}
+		})
+	}
 }
