@@ -1,0 +1,16 @@
+# floatingPid probe fails when the process restarted more than `threshold`
+# times within `period` (crash-loop detection). The initial start counts too.
+# The process below crashes every 2 seconds: the probe reports it as not ready.
+#
+#   go run . -config examples/floating-pid.yaml
+#   curl -i localhost:8111/readiness
+- name: "crashloop"
+  entrypoint: "sh"
+  args: ["-c", "sleep 2; exit 1"]
+  readiness:
+    delay: "1s"
+    period: "1s"
+    failureThreshold: 1000      # let the crash loop itself restart the process
+    floatingPid:
+      period: "10s"             # default 10s
+      threshold: 1              # default 1

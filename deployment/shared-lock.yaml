@@ -116,15 +116,32 @@ spec:
           requests:
             cpu: 100m
             memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
         volumeMounts:
+        - mountPath: /tmp
+          name: tmp
         - mountPath: /cert/tls/
           name: etcd-main-tls
           readOnly: true
       dnsPolicy: ClusterFirst
       restartPolicy: Always
-      securityContext: {}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       terminationGracePeriodSeconds: 30
       volumes:
+      - name: tmp
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Mi
       - name: etcd-main-tls
         secret:
           defaultMode: 420

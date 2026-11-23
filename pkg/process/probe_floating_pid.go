@@ -12,13 +12,13 @@ const (
 )
 
 type FloatingPid struct {
-	State     *State
+	State     *State   `yaml:"-" json:"-"`
 	Period    Duration `yaml:"period"`
 	Threshold int      `yaml:"threshold"`
 }
 
 func (p FloatingPid) Run(name string) bool {
-	if p.Period.Duration.Seconds() == 0 {
+	if p.Period.Seconds() == 0 {
 		p.Period.Duration = time.Second * DefaultFloatingPidDurationSeconds
 	}
 	if p.Threshold == 0 {

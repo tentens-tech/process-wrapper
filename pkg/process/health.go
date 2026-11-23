@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/username1366/prommerge"
 	"io"
 	"net/http"
 	"os"
 	"process-wrapper/pkg/metrics"
+	"process-wrapper/pkg/prommerge"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +23,10 @@ const (
 	defaultEnvoyAdminURL = "http://localhost:15000/drain_listeners"
 	defaultSocket        = ":8111"
 	floatingPidHistory   = 10
+	// Metadata server holds wait_for_change requests up to timeout_sec (60s)
+	metadataClientTimeout = 90 * time.Second
+	metadataRetryDelay    = 5 * time.Second
+	waitPollInterval      = time.Second
 )
 
 // Health interface implements all probes
@@ -58,7 +63,18 @@ type State struct {
 	cancelRoutineMap map[string]context.CancelFunc
 	preemptedEvent   chan struct{}
 	M                *metrics.Server
+	mux              *http.ServeMux
+	muxOnce          sync.Once
 	sync.RWMutex
+}
+
+// Mux returns the handlers served on the health socket. It is a dedicated
+// ServeMux instead of http.DefaultServeMux, so handlers that dependencies
+// register globally (expvar /debug/vars, x/net/trace /debug/requests and
+// /debug/events) are not exposed.
+func (s *State) Mux() *http.ServeMux {
+	s.muxOnce.Do(func() { s.mux = http.NewServeMux() })
+	return s.mux
 }
 
 func NewState(readinessFile string, envoyDrain bool) *State {
@@ -152,6 +168,26 @@ func (s *State) SetPid(name string, pid int) {
 	s.Unlock()
 }
 
+// RemovePid forgets the pid of an exited process, so signals are never sent to a reused pid
+func (s *State) RemovePid(name string, pid int) {
+	s.Lock()
+	if s.pidsMap[name] == pid {
+		delete(s.pidsMap, name)
+	}
+	s.Unlock()
+}
+
+// IsKnownProcess reports whether a process with the name is managed by the wrapper
+func (s *State) IsKnownProcess(name string) bool {
+	s.RLock()
+	defer s.RUnlock()
+	_, ok := s.statusMap[name]
+	if !ok {
+		_, ok = s.pidsMap[name]
+	}
+	return ok
+}
+
 func (s *State) SetCancelRoutine(name string, cancel context.CancelFunc) {
 	s.Lock()
 	s.cancelRoutineMap[name] = cancel
@@ -242,7 +278,7 @@ var metaHTTPClient *http.Client
 
 func (s *State) GetMetadataClient() *http.Client {
 	if metaHTTPClient == nil {
-		metaHTTPClient = &http.Client{Transport: &http.Transport{}}
+		metaHTTPClient = &http.Client{Timeout: metadataClientTimeout}
 		return metaHTTPClient
 	}
 	return metaHTTPClient
@@ -257,7 +293,8 @@ func (s *State) GetMetadataRequest() (*http.Request, error) {
 		if metadataURL == "" {
 			metadataURL = defaultMetadataURL
 		}
-		metadataRequest, err = http.NewRequest("GET", metadataURL, nil)
+		// #nosec G704 -- URL comes from operator-controlled env (METADATA_URL) or a constant
+		metadataRequest, err = http.NewRequest(http.MethodGet, metadataURL, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -268,41 +305,13 @@ func (s *State) GetMetadataRequest() (*http.Request, error) {
 }
 
 func (s *State) WaitPreemptionState() {
-	var (
-		err  error
-		resp *http.Response
-		req  *http.Request
-		data []byte
-	)
 	for {
-		client := s.GetMetadataClient()
-		req, err = s.GetMetadataRequest()
+		status, err := s.getPreemptionStatus()
 		if err != nil {
-			log.Warnf("Failed to build metadata request")
+			log.Warnf("Cannot get instance metadata to check node preemption, %v", err)
+			time.Sleep(metadataRetryDelay)
 			continue
 		}
-		resp, err = client.Do(req)
-		if err != nil {
-			log.Warnf("Cannot get instance metadata to check node preemtion, %v", err)
-			time.Sleep(time.Millisecond * 500)
-			continue
-		}
-		data, err = io.ReadAll(resp.Body)
-		if err != nil {
-			log.Warnf("Cannot read instance metadata to check node preemtion, %v", err)
-			continue
-		}
-		err = resp.Body.Close()
-		if err != nil {
-			log.Warnf("Cannot close metadata body to check node preemtion, %v", err)
-			continue
-		}
-		if resp.StatusCode > 299 {
-			log.Warnf("Metadata unknown response, status code: %v", resp.StatusCode)
-			continue
-		}
-
-		status := string(data)
 		if status == "TRUE" {
 			s.preemptedEvent <- struct{}{}
 			s.M.PushPreemptedEvent()
@@ -311,6 +320,26 @@ func (s *State) WaitPreemptionState() {
 		}
 		log.Debugf("Preemption status: %v", status)
 	}
+}
+
+func (s *State) getPreemptionStatus() (string, error) {
+	req, err := s.GetMetadataRequest()
+	if err != nil {
+		return "", fmt.Errorf("build metadata request: %w", err)
+	}
+	resp, err := s.GetMetadataClient().Do(req) // #nosec G704 -- see GetMetadataRequest
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	if err != nil {
+		return "", fmt.Errorf("read metadata response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("metadata unexpected status code %v", resp.StatusCode)
+	}
+	return strings.TrimSpace(string(data)), nil
 }
 
 func (s *State) PreemptionChecker(ctx context.Context) {
@@ -342,7 +371,7 @@ func (s *State) DrainEnvoyListeners() {
 		return
 	}
 	log.Warnf("Drain envoy listeners")
-	client := &http.Client{Transport: &http.Transport{}}
+	client := &http.Client{Timeout: 10 * time.Second}
 	envoyAdminURL := os.Getenv("ENVOY_DRAIN_URL")
 	if envoyAdminURL == "" {
 		envoyAdminURL = defaultEnvoyAdminURL
@@ -350,13 +379,14 @@ func (s *State) DrainEnvoyListeners() {
 
 	var err error
 	var envoyRequest *http.Request
-	envoyRequest, err = http.NewRequest("POST", envoyAdminURL, nil)
+	// #nosec G704 -- URL comes from operator-controlled env (ENVOY_DRAIN_URL) or a constant
+	envoyRequest, err = http.NewRequest(http.MethodPost, envoyAdminURL, nil)
 	if err != nil {
 		log.Errorf("Envoy listeners drain error, cannot prepare request")
 		return
 	}
 	var resp *http.Response
-	resp, err = client.Do(envoyRequest)
+	resp, err = client.Do(envoyRequest) // #nosec G704 -- see above
 	if err != nil {
 		log.Errorf("Envoy listeners drain error, cannot make request, %v", err)
 		return
@@ -394,6 +424,7 @@ func (s *State) CreateReadinessFile() {
 			err := os.WriteFile(s.ReadinessFile, []byte{}, 0600)
 			if err != nil {
 				log.Errorf("%v", err)
+				time.Sleep(time.Second)
 				continue
 			}
 			return
@@ -403,14 +434,16 @@ func (s *State) CreateReadinessFile() {
 }
 
 func (s *State) RemoveReadinessFile() {
+	// The file may not exist if the processes never became ready
 	err := os.Remove(s.ReadinessFile)
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		log.Errorf("%v", err)
 	}
 }
 
 func (s *State) Readiness() bool {
-	if s.IsPreempted() {
+	// Stop receiving traffic on preemption and during graceful shutdown
+	if s.IsPreempted() || s.IsShutdown() {
 		return false
 	}
 	for name, state := range s.ProcessState() {
@@ -434,24 +467,49 @@ func (s *State) Liveness() bool {
 	return true
 }
 
+// waitHealthy blocks until check returns true or the client goes away.
+// The server-wide write timeout is lifted for this request.
+func waitHealthy(w http.ResponseWriter, r *http.Request, check func() bool) {
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil {
+		log.Debugf("Cannot reset write deadline, %v", err)
+	}
+	t := time.NewTicker(waitPollInterval)
+	defer t.Stop()
+	for !check() {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-t.C:
+		}
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
 func (s *State) HealthEndpoint() {
 	var socket string
 	socket = os.Getenv("HEALTH_SOCKET")
 	if socket == "" {
 		socket = defaultSocket
 	}
-	http.HandleFunc("/readiness", func(w http.ResponseWriter, r *http.Request) {
+	mux := s.Mux()
+	s.registerHealthHandlers(mux)
+	server := &http.Server{
+		Addr:         socket,
+		Handler:      mux,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	}
+
+	log.Fatalln(server.ListenAndServe())
+}
+
+// registerHealthHandlers registers readiness, liveness and process state endpoints
+func (s *State) registerHealthHandlers(mux *http.ServeMux) {
+	mux.HandleFunc("/readiness", func(w http.ResponseWriter, r *http.Request) {
 		log.Debugf("GET /readiness")
 		if r.URL.Query().Has("wait") {
-			for {
-				health := s.Readiness()
-				log.Debugf("Readiness status: %v", health)
-				if health {
-					w.WriteHeader(http.StatusOK)
-					return
-				}
-				time.Sleep(time.Second * 1)
-			}
+			waitHealthy(w, r, s.Readiness)
+			return
 		}
 		health := s.Readiness()
 		log.Debugf("Readiness status: %v", health)
@@ -459,26 +517,19 @@ func (s *State) HealthEndpoint() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 	})
-	http.HandleFunc("/liveness", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/liveness", func(w http.ResponseWriter, r *http.Request) {
 		log.Debugf("GET /liveness")
 		if r.URL.Query().Has("wait") {
-			for {
-				health := s.Liveness()
-				log.Debugf("Liveness status: %v", health)
-				if health {
-					w.WriteHeader(http.StatusOK)
-					return
-				}
-				time.Sleep(time.Second * 1)
-			}
+			waitHealthy(w, r, s.Liveness)
+			return
 		}
 		health := s.Liveness()
-		log.Debugf("Readiness status: %v", health)
+		log.Debugf("Liveness status: %v", health)
 		if !health {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 	})
-	http.HandleFunc("/pidof", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/pidof", func(w http.ResponseWriter, r *http.Request) {
 		log.Debugf("GET /pidof")
 		name := r.URL.Query().Get("name")
 		if name == "" {
@@ -492,12 +543,12 @@ func (s *State) HealthEndpoint() {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		_, err := w.Write([]byte(fmt.Sprintf("%v", pid)))
+		_, err := fmt.Fprintf(w, "%d", pid)
 		if err != nil {
 			log.Errorf("Failed to write response for /pidof endpoint, %v", err)
 		}
 	})
-	http.HandleFunc("/pids", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/pids", func(w http.ResponseWriter, _ *http.Request) {
 		log.Debugf("GET /pids")
 		pids := s.GetPidsMap()
 		if len(pids) == 0 {
@@ -509,14 +560,16 @@ func (s *State) HealthEndpoint() {
 		if err != nil {
 			log.Errorf("Failed to marshal /pids body payload")
 			w.WriteHeader(http.StatusInternalServerError)
+			return
 		}
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, err = w.Write(jData)
 		if err != nil {
 			log.Errorf("Failed to write response for /pids endpoint, %v", err)
 		}
 	})
-	http.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
 		log.Debugf("GET /status")
 		state := s.ProcessState()
 		if len(state) == 0 {
@@ -531,53 +584,52 @@ func (s *State) HealthEndpoint() {
 		}
 	})
 
-	http.HandleFunc("/heartbeat", func(w http.ResponseWriter, r *http.Request) {
-		log.Debugf("GET /heartbeat")
+	mux.HandleFunc("/heartbeat", func(w http.ResponseWriter, r *http.Request) {
+		log.Debugf("%v /heartbeat", r.Method)
 		name := r.URL.Query().Get("name")
-		if name == "" {
-			w.WriteHeader(http.StatusBadRequest)
+		// Only managed processes may report heartbeats: arbitrary names would grow
+		// the state and the heartbeat metric without bound
+		if name != "" && !s.IsKnownProcess(name) {
+			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 
 		switch r.Method {
 		case http.MethodGet:
+			var body any = s.GetAllHeartBeat()
+			if name != "" {
+				body = map[string]string{"name": name, "lastHeartBeat": s.GetHeartBeat(name).String()}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if _, err := w.Write(s.httpSerializer(body)); err != nil {
+				log.Errorf("Failed to write response for /heartbeat endpoint, %v", err)
+			}
+		case http.MethodPatch:
 			if name == "" {
-				w.WriteHeader(http.StatusCreated)
-				_, err := w.Write(s.httpSerializer(s.GetAllHeartBeat()))
-				if err != nil {
-					log.Errorf("Failed to write response for /heaerbeat endpoint, %v", err)
-				}
+				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			t := s.GetHeartBeat(name)
-			resp := fmt.Sprintf(`{"name": "%v", "lastHeartBeat": "%v"}`, name, t.String())
-			_, err := w.Write([]byte(resp))
-			if err != nil {
-				log.Errorf("Failed to write response for /heaerbeat endpoint, %v", err)
-			}
-			return
-		case http.MethodPatch:
 			s.SetHeartBeat(name, time.Now())
 			w.WriteHeader(http.StatusAccepted)
-			return
-
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
 	})
-	server := &http.Server{
-		Addr:         socket,
-		Handler:      nil, // You can set your handler here
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-	}
-
-	log.Fatalln(server.ListenAndServe())
 }
 
-func (s *State) GetReadyPromTargets(targets []prommerge.PromTarget) []prommerge.PromTarget {
-	var readyTargets []prommerge.PromTarget
+func (s *State) GetReadyPromTargets(targets []prommerge.Target) []prommerge.Target {
+	var readyTargets []prommerge.Target
 	ps := s.ProcessState()
-	for i, _ := range targets {
-		if ps[targets[i].Name] {
+	for i := range targets {
+		processes := targets[i].Processes
+		if len(processes) == 0 {
+			processes = []string{targets[i].Name}
+		}
+		ready := false
+		for _, name := range processes {
+			ready = ready || ps[name]
+		}
+		if ready {
 			readyTargets = append(readyTargets, targets[i])
 			continue
 		}
@@ -586,34 +638,31 @@ func (s *State) GetReadyPromTargets(targets []prommerge.PromTarget) []prommerge.
 	return readyTargets
 }
 
-func (s *State) PromMergeHandler(targets []prommerge.PromTarget, opts prommerge.PromDataOpts) {
-	http.HandleFunc("/prommerge", func(writer http.ResponseWriter, request *http.Request) {
-		pd := prommerge.NewPromData(s.GetReadyPromTargets(targets), opts)
-		t := time.Now()
-		err := pd.CollectTargets()
-		if err != nil {
-			log.Warnf("Prommerge error, %v", err)
-		}
-		if len(pd.PromTargets) == 0 {
+// PromMergeHandler registers /prommerge, which merges metrics of all ready processes
+func (s *State) PromMergeHandler(targets []prommerge.Target, merger *prommerge.Merger) {
+	s.Mux().HandleFunc("/prommerge", func(writer http.ResponseWriter, request *http.Request) {
+		readyTargets := s.GetReadyPromTargets(targets)
+		if len(readyTargets) == 0 {
 			writer.WriteHeader(http.StatusNoContent)
 			return
 		}
-		promOutput := pd.ToString()
-		total := time.Since(t)
 
-		if total > time.Second*30 {
-			log.Printf("Slow promTargets collection: collect=%v, sort=%v, out_prepare=%v, out_process=%v, out_generate=%v, total=%v",
-				pd.CollectTargetsDuration.String(),
-				pd.SortDuration.String(),
-				pd.OutputPrepareDuration.String(),
-				pd.OutputProcessDuration.String(),
-				pd.OutputGenerateDuration.String(),
-				total.String(),
-			)
+		t := time.Now()
+		families, err := merger.Collect(request.Context(), readyTargets)
+		if err != nil {
+			// Individual target failures are logged by the merger
+			log.Debugf("Prommerge error, %v", err)
 		}
-
+		total := time.Since(t)
+		if total > time.Second*30 {
+			log.Printf("Slow promTargets collection: total=%v", total)
+		}
 		metrics.SidecarMetricsMergeDurationSecondsBucket.With(prometheus.Labels{}).Observe(total.Seconds())
-		writer.Write([]byte(promOutput))
+
+		writer.Header().Set("Content-Type", prommerge.ContentType)
+		if err = prommerge.Write(writer, families); err != nil {
+			log.Errorf("Failed to write response for /prommerge endpoint, %v", err)
+		}
 	})
 }
 

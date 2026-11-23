@@ -1,0 +1,24 @@
+# Two processes with a file readiness probe.
+# The process marks itself ready by creating a file; remove it to see the
+# readiness endpoint switch to 503 and the process being restarted.
+#
+#   go run . -config examples/basic.yaml
+#   curl -i localhost:8111/readiness
+#   rm /tmp/worker-1.ready   # 3 failed checks in a row -> restart
+- name: "worker-1"
+  entrypoint: "sh"
+  args:
+    - "-c"
+    - "touch /tmp/worker-1.ready && exec sleep 3600"
+  terminationGracePeriod: "5s" # SIGTERM -> SIGKILL delay on probe restart (default 10s)
+  readiness:
+    delay: "1s"            # wait before the first check (default 5s)
+    period: "2s"           # interval between checks (default 5s)
+    failureThreshold: 3    # consecutive failed checks before restart (default 3)
+    file:
+      path: "/tmp/worker-1.ready"
+- name: "worker-2"
+  entrypoint: "sleep"
+  args:
+    - "3600"
+  # replicas: 3            # run N copies named worker-2_0..worker-2_N-1

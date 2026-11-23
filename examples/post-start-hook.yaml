@@ -1,0 +1,24 @@
+# postStart hook runs once, after the first successful readiness check.
+# The process becomes ready only when the hook succeeds; a failed hook kills
+# and restarts the process. Hook envs are the process envs.
+#
+#   go run . -config examples/post-start-hook.yaml
+#   cat /tmp/post-start-hook.log
+- name: "app"
+  entrypoint: "sh"
+  args: ["-c", "touch /tmp/app.ready && exec sleep 3600"]
+  envs:
+    GREETING: "hello from postStart"
+  readiness:
+    delay: "1s"
+    period: "2s"
+    file:
+      path: "/tmp/app.ready"
+  postStart:
+    deadline: "10s"             # default 30s
+    command:
+      entrypoint: "sh"
+      args: ["-c", "echo \"$GREETING\" >> /tmp/post-start-hook.log"]
+    # sql:                      # executed against MYSQL_DSN from the process envs
+    #   queries:
+    #     - "SET GLOBAL read_only = 0"

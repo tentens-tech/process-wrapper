@@ -1,0 +1,26 @@
+# sql probe: every query must return all `contains` values in its first column.
+# MYSQL_DSN is taken from the process envs (go-sql-driver/mysql DSN format).
+# Each query has a 10s timeout; the probe keeps one connection open.
+#
+#   docker run -d --name mysql -e MYSQL_ROOT_PASSWORD=secret -p 3306:3306 mysql:8.4
+#   go run . -config examples/sql-probe.yaml
+- name: "app"
+  entrypoint: "sleep"
+  args: ["3600"]
+  envs:
+    MYSQL_DSN: "root:secret@tcp(127.0.0.1:3306)/mysql"
+  readiness:
+    delay: "5s"
+    period: "5s"
+    failureThreshold: 3
+    sql:
+      queries:
+        - "SELECT IF(@@read_only = 0, 'writable', 'read-only')"
+      contains:
+        - "writable"
+# ProxySQL example: wait until writer and reader hostgroups are ONLINE
+#    sql:
+#      queries:
+#        - "SELECT hg.comment FROM runtime_mysql_servers ms JOIN runtime_mysql_replication_hostgroups hg ON ms.hostgroup_id = hg.writer_hostgroup WHERE ms.status = 'ONLINE'"
+#      contains:
+#        - "monolith"

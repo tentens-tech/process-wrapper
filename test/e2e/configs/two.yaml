@@ -1,0 +1,6 @@
+- name: "a"
+  entrypoint: "sleep"
+  args: ["3600"]
+- name: "b"
+  entrypoint: "sleep"
+  args: ["3600"]

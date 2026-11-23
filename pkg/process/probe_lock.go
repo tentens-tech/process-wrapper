@@ -2,35 +2,48 @@ package process
 
 import (
 	"bytes"
-	"fmt"
-	log "github.com/sirupsen/logrus"
+	"io"
 	"net/http"
+	"time"
+
+	log "github.com/sirupsen/logrus"
 )
+
+const LockProbeTimeout = 5 * time.Second
+
+var lockProbeClient = &http.Client{Timeout: LockProbeTimeout}
 
 type LockProbe struct {
 	Lease       string `yaml:"-"`
 	TTLDuration string `yaml:"ttlDuration"`
 }
 
+// String must not contain the lease ID: it is used as a metric event label
 func (p LockProbe) String() string {
-	return fmt.Sprintf("Check lease %v", p.Lease)
+	return "Check lease"
 }
 
 func (p LockProbe) Run(name string) bool {
+	logger := log.WithFields(log.Fields{"name": name, "lease": p.Lease})
 	url := SharedLockURL + DefaultSharedLockKeepAliveEndpoint
-	data := bytes.NewBufferString(p.Lease)
-	resp, err := http.Post(url, "text/plain", data)
+	resp, err := lockProbeClient.Post(url, "text/plain", bytes.NewBufferString(p.Lease))
 	if err != nil {
-		log.WithFields(log.Fields{"name": name}).Errorf("Failed to keep lease alive: %v", err)
+		logger.Errorf("Failed to keep lease alive: %v", err)
 		return false
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 
-	if resp.StatusCode == http.StatusNoContent {
-		log.WithFields(log.Fields{"name": name}).Warnf("Lease is expired")
-		return false
+	switch resp.StatusCode {
+	case http.StatusOK:
+		logger.Debugf("Prolong KeepAlive OK")
+		return true
+	case http.StatusNoContent:
+		logger.Warnf("Lease is expired")
+	default:
+		logger.Errorf("Failed to keep lease alive, unexpected status code %v", resp.StatusCode)
 	}
-
-	log.WithFields(log.Fields{"name": name}).Debugf("Prolong KeepAlive OK")
-	return true
+	return false
 }

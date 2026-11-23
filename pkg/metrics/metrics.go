@@ -37,8 +37,9 @@ var (
 	SidecarMetricsMergeDurationSecondsBucket *prometheus.HistogramVec
 )
 
-func PrometheusHandler() {
-	http.Handle("/metrics", promhttp.Handler())
+// PrometheusHandler registers /metrics on mux
+func PrometheusHandler(mux *http.ServeMux) {
+	mux.Handle("/metrics", promhttp.Handler())
 }
 
 func init() {
@@ -161,9 +162,10 @@ func GetExtraFileLabels() {
 		}
 
 		var labelsFile *os.File
-		labelsFile, err = os.Open(extraLabelsFilePath)
+		labelsFile, err = os.Open(extraLabelsFilePath) // #nosec G304 -- path is provided by the operator via env
 		if err != nil {
-			log.Errorf("Cannot read the labels file %v", extraLabelsFilePath)
+			log.Errorf("Cannot read the labels file %v, %v", extraLabelsFilePath, err)
+			return
 		}
 		defer labelsFile.Close()
 		reader := bufio.NewReader(labelsFile)
@@ -186,7 +188,10 @@ func GetExtraFileLabels() {
 					}
 				}
 			}
-			if err == io.EOF {
+			if err != nil {
+				if err != io.EOF {
+					log.Errorf("Failed to read the labels file %v, %v", extraLabelsFilePath, err)
+				}
 				break
 			}
 		}

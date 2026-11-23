@@ -1,0 +1,18 @@
+- name: "healthy"
+  entrypoint: "sleep"
+  args: ["3600"]
+- name: "broken"
+  entrypoint: "/nonexistent/binary"
+- name: "jobs"
+  entrypoint: "sh"
+  args: ["-c", "sleep 3600 & echo $! > /tmp/jobs.child; i=0; while [ $i -lt 3 ]; do head -c 200000 /dev/zero | tr '\\0' 'x'; i=$((i+1)); done; echo; exec sleep 3600"]
+  readiness:
+    delay: "1s"
+    period: "1s"
+    failureThreshold: 2
+    file:
+      path: "/tmp/jobs.ok"
+  postStart:
+    command:
+      entrypoint: "sh"
+      args: ["-c", "yes"]

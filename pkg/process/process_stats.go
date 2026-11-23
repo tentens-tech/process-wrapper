@@ -25,7 +25,9 @@ func (c *Command) GetStats(ctx context.Context, pid int) {
 	var err error
 	var cpuSeconds, cpuDelta, memoryUsage float64
 	var failedStatCollection int
-	log.WithFields(log.Fields{"name": c.Name, "pid": pid}).Warnf("Memory limit: %v", c.MemoryLimitMB)
+	if c.MemoryLimitMB > 0 {
+		log.WithFields(log.Fields{"name": c.Name, "pid": pid}).Printf("Memory limit: %vMB", c.MemoryLimitMB)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -43,11 +45,6 @@ func (c *Command) GetStats(ctx context.Context, pid int) {
 				time.Sleep(time.Second)
 				continue
 			}
-			if cpuSeconds+cpuDelta+memoryUsage == 0 {
-				log.WithFields(log.Fields{"name": c.Name, "pid": pid}).Warnf("Unknown process stats")
-				time.Sleep(time.Second * GetStatsPeriodSeconds)
-				continue
-			}
 			failedStatCollection = 0
 			metrics.SidecarCmdCPUSeconds.WithLabelValues(c.Name).Add(cpuDelta)
 			metrics.SidecarCmdCPUSecondsGauge.WithLabelValues(c.Name).Set(cpuSeconds)
@@ -59,13 +56,15 @@ func (c *Command) GetStats(ctx context.Context, pid int) {
 			if c.MemoryLimitMB > 0 && memoryUsage/1000000 > c.MemoryLimitMB {
 				log.WithFields(log.Fields{"name": c.Name, "pid": pid}).Warnf("Out of memory %v > %v, killing the process", memoryUsage/1000000, c.MemoryLimitMB)
 				c.s.SetKillState(c.Name, true)
-				err = syscall.Kill(pid, syscall.SIGKILL)
+				err = SignalGroup(pid, syscall.SIGKILL)
 				if err != nil {
 					log.WithFields(log.Fields{"name": c.Name, "pid": pid}).Warnf("Terminate process failure %v", err)
 				}
-				metrics.SidecarCmdReadinessCount.WithLabelValues("oom", c.Name, c.String()).Inc()
+				metrics.SidecarCmdReadinessCount.WithLabelValues("oom", c.Name, c.Entrypoint).Inc()
 			}
-			time.Sleep(time.Second * GetStatsPeriodSeconds)
+			if !sleepCtx(ctx, time.Second*GetStatsPeriodSeconds) {
+				return
+			}
 		}
 	}
 }

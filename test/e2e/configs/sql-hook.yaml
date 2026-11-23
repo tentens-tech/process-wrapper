@@ -1,0 +1,8 @@
+- name: "sql-hook"
+  entrypoint: "sleep"
+  args: ["3600"]
+  envs:
+    MYSQL_DSN: "root:secret@tcp(127.0.0.1:3306)/mysql"
+  postStart:
+    sql:
+      queries: ["CREATE DATABASE IF NOT EXISTS e2e_hook"]

@@ -1,34 +1,43 @@
+version: "2"
 run:
   concurrency: 4
   tests: false
-
-issues:
-  exclude-dirs:
-    - ^cmd/
-    - ^examples/
-    - ^deployment/
-  exclude-files:
-    - ^pkg/stat/tcp_connections.go
-    - ^pkg/stat/transport.go
-
 linters:
-  disable-all: true
+  default: none
   enable:
-    - staticcheck
-    - gosimple
-    - ineffassign
-    - typecheck
-    - govet
-    - unused
-    - stylecheck
-    - gosec
-    - unconvert
-    - gocyclo
-    - misspell
-    - unparam
-    - exportloopref
-    - gocritic
     - asciicheck
     - bodyclose
+    - gocritic
+    - gocyclo
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
     - revive
-
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - ^pkg/stat/tcp_connections.go
+      - ^pkg/stat/transport.go
+      - ^cmd/
+      - ^examples/
+      - ^deployment/
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

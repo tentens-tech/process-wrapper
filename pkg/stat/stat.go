@@ -30,7 +30,8 @@ func NewProcStats(pid int, clktck, pageSize float64) *ProcStat {
 		}(clktck),
 		pageSize: func(pageSize float64) float64 {
 			if pageSize == 0 {
-				return PAGESIZE
+				// Page size differs between platforms (e.g. 16K/64K on arm64)
+				return float64(os.Getpagesize())
 			}
 			return pageSize
 		}(pageSize),
@@ -64,7 +65,7 @@ func (p *ProcStat) Stat() (float64, float64, float64, error) {
 func sTof64(input string) float64 {
 	value, err := strconv.ParseFloat(input, 64)
 	if err != nil {
-		fmt.Printf("Cannot convert string %v to float, %v", input, err)
+		fmt.Fprintf(os.Stderr, "Cannot convert string %v to float, %v\n", input, err)
 		return 0
 	}
 	return value

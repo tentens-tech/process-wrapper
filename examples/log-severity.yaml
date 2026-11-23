@@ -1,0 +1,25 @@
+# Output handling. logfmt lines with level=/msg= keys are re-emitted with the
+# original severity; other lines are wrapped into process-wrapper logs.
+# logFormat (or LOG_FORMAT env for all processes):
+#   ""     - wrap every line as info (default)
+#   "auto" - detect severity by CRITICAL/ERROR/WARNING substrings
+#   "free" - print lines as is
+#
+#   go run . -config examples/log-severity.yaml
+- name: "severity-auto"
+  logFormat: "auto"
+  entrypoint: "sh"
+  args:
+    - "-c"
+    - "echo 'CRITICAL something broke'; echo 'WARNING disk is almost full'; echo 'INFO started'; exec sleep 3600"
+- name: "severity-logfmt"
+  entrypoint: "sh"
+  args:
+    - "-c"
+    - "echo 'level=error msg=\"logfmt error\"'; echo 'level=warning msg=\"logfmt warning\"'; exec sleep 3600"
+- name: "free-format"
+  logFormat: "free"
+  entrypoint: "sh"
+  args:
+    - "-c"
+    - "echo 'printed as is'; exec sleep 3600"

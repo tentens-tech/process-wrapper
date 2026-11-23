@@ -88,32 +88,41 @@ func (p *PodStatus) ReadStatus() error {
 		return err
 	}
 
-	req, err := http.NewRequest("GET", uri, nil)
+	// #nosec G704 -- in-cluster Kubernetes API URL built from pod env
+	req, err := http.NewRequest(http.MethodGet, uri, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Add("Authorization", fmt.Sprintf("Bearer %v", string(token)))
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // #nosec G704 -- see above
 	if err != nil {
 		return err
 	}
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-
 	defer func() {
 		if e := resp.Body.Close(); e != nil {
 			log.Errorf("%v", e)
 		}
 	}()
 
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected pod status response code %d", resp.StatusCode)
+	}
+
 	err = json.Unmarshal(data, p)
 	if err != nil {
 		log.Errorf("Pod status: %v", string(data))
 		return err
 	}
+	p.handleStatus()
+	return nil
+}
+
+// handleStatus stops the wrapper when the main container of the pod has completed
+func (p *PodStatus) handleStatus() {
 	log.Debugf("Pod status: %+v", p.Status.ContainerStatuses)
 	for _, s := range p.Status.ContainerStatuses {
 		log.Debugf("Container %v status: %+v", s.Name, s.State)
@@ -126,6 +135,4 @@ func (p *PodStatus) ReadStatus() error {
 			}
 		}
 	}
-
-	return err
 }

@@ -1,0 +1,22 @@
+- name: "hook-envs"   # hook gets process envs, postStart.envs and command envs on top
+  entrypoint: "sleep"
+  args: ["3600"]
+  envs: {PROCESS_ENV: "process", OVERRIDDEN: "process"}
+  dir: "/e2e"
+  postStart:
+    envs: {HOOK_ENV: "hook", OVERRIDDEN: "hook"}
+    command:
+      entrypoint: "sh"
+      args: ["-c", "echo \"$PROCESS_ENV $HOOK_ENV $HOOK_CMD_ENV $OVERRIDDEN $(pwd)\" > /tmp/hook-envs.out"]
+      envs: {HOOK_CMD_ENV: "cmd"}
+- name: "hook-deadline"   # hook exceeding the deadline fails, the process is restarted
+  entrypoint: "sleep"
+  args: ["3600"]
+  postStart:
+    deadline: "2s"
+    command: {entrypoint: "sleep", args: ["30"]}
+- name: "hook-fail"
+  entrypoint: "sleep"
+  args: ["3600"]
+  postStart:
+    command: {entrypoint: "sh", args: ["-c", "echo hook-fail-ran >> /tmp/hook-fail.log; exit 1"]}

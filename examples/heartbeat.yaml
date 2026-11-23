@@ -1,10 +1,19 @@
+# heartBeat probe fails when the process hasn't reported a heartbeat within
+# `period`. The process reports it with
+#   PATCH http://localhost:8111/heartbeat?name=<process name>
+# Only names of managed processes are accepted (404 otherwise).
+# GET /heartbeat returns the last heartbeat of every process.
+#
+#   go run . -config examples/heartbeat.yaml
+#   curl localhost:8111/heartbeat
 - name: "heart"
-  entrypoint: "sleep"
+  entrypoint: "sh"
   args:
-    - "10000"
+    - "-c"
+    - "while true; do curl -sf -X PATCH 'http://localhost:8111/heartbeat?name=heart'; sleep 5; done"
   readiness:
-    delay: "5s"
-    period: "10s"
-    failureThreshold: 10
+    delay: "6s"
+    period: "5s"
+    failureThreshold: 3
     heartBeat:
-      period: "10s"
+      period: "15s"             # max allowed time since the last heartbeat (default 30s)

@@ -1,0 +1,64 @@
+# Every config field, see "Configuration" in README.md
+- name: "app"
+  entrypoint: "sh"
+  args: ["-c", "exec sleep 3600"]
+  dir: "/srv/app"
+  envs:
+    PORT: "8080"
+  envsFile: "/etc/app/envs"
+  restartPolicy: "Always"
+  logFormat: "auto"
+  replicas: 2
+  memoryLimitMB: 512.5
+  terminationGracePeriod: "15s"
+  promTarget: "http://localhost:8080/metrics"
+  sysProcAttr:
+    setpgid: true
+    credential:
+      uid: 1000
+      gid: 1001
+      groups: [1002]
+  readiness:
+    delay: "1s"
+    period: "2s"
+    startupDeadline: "3m"
+    failureThreshold: 4
+    http:
+      url: "http://localhost:8080/health"
+    tcp:
+      socket: "localhost:8080"
+    file:
+      path: "/tmp/app.ready"
+    env:
+      name: "PROBE_ENV"
+      value: "enabled"
+    exec:
+      command:
+        entrypoint: "test"
+        args: ["-f", "/tmp/app.ready"]
+        dir: "/tmp"
+        envs:
+          EXPECTED: "ok"
+    sql:
+      queries: ["SELECT 1"]
+      contains: ["1"]
+    amqp:
+      reuseConn: true
+    floatingPid:
+      period: "20s"
+      threshold: 2
+    heartBeat:
+      period: "45s"
+    lock:
+      ttlDuration: "5s"
+  postStart:
+    deadline: "10s"
+    envs:
+      HOOK_ENV: "hook"
+    sql:
+      queries: ["SET GLOBAL read_only = 0"]
+    command:
+      entrypoint: "sh"
+      args: ["-c", "echo started"]
+      envs:
+        HOOK_CMD_ENV: "cmd"

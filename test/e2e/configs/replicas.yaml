@@ -1,0 +1,8 @@
+# every replica runs the hook, the shared promTarget is merged once
+- name: "rep"
+  replicas: 2
+  entrypoint: "sleep"
+  args: ["3600"]
+  promTarget: "http://127.0.0.1:8111/metrics"
+  postStart:
+    command: {entrypoint: "sh", args: ["-c", "echo hook >> /tmp/replica-hooks"]}

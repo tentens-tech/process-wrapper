@@ -1,0 +1,4 @@
+- name: "dir"
+  entrypoint: "sh"
+  args: ["-c", "echo \"PWD_IS=$(pwd)\"; exec sleep 3600"]
+  dir: "/e2e"
