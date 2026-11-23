@@ -499,3 +499,37 @@ func TestRestartBackoffInterruptedByGracefulShutdown(t *testing.T) {
 		t.Fatal("back-off is not interrupted by a graceful shutdown")
 	}
 }
+
+// A reconnect uses the current Envs, not the DSN of the first connection
+func TestAMQPProbeReconnectUsesCurrentEnvs(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	envs := func(pass string) map[string]string {
+		return map[string]string{
+			AMQPProbeDsnTemplateEnvName:  "amqp://%v:%v@" + ln.Addr().String(),
+			AMQPProbeRabbitMqUserEnvName: "u",
+			AMQPProbeRabbitMqPassEnvName: pass,
+		}
+	}
+	p := &AMQPProbe{OperationsTimeout: Duration{time.Second}, Envs: envs("old")}
+	if p.Run("app") {
+		t.Fatal("a broker that closes the connection must fail the probe")
+	}
+	p.Envs = envs("new")
+	p.Run("app")
+	if !strings.Contains(p.conn.dsn, ":new@") {
+		t.Fatalf("the reconnect must use the current password, dsn %q", p.conn.dsn)
+	}
+}

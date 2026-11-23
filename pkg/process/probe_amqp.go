@@ -70,16 +70,15 @@ func (p *AMQPProbe) Run(name string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.dsn == "" {
+	if c.connection == nil {
+		// The DSN is built for every new connection: Envs are refreshed on
+		// every probe run (e.g. a rotated password in envsFile)
 		dsn, err := p.DSN()
 		if err != nil {
 			logger.Errorf("Failed to create DSN: %v", err)
 			return false
 		}
 		c.dsn = dsn
-	}
-
-	if c.connection == nil {
 		if err := p.connect(c); err != nil {
 			logger.Errorf("Failed to open amqp probe connection: %v", err)
 			c.reset()
