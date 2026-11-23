@@ -267,8 +267,6 @@ func escapeLabelValue(v string) string {
 	return v
 }
 
-const defaultVMAgentPushURL = "http://vmagent-vmagent.monitoring.svc.cluster.local:8429/api/v1/import/prometheus"
-
 type VMAgentPusher struct {
 	url    string
 	client *http.Client
@@ -277,10 +275,8 @@ type VMAgentPusher struct {
 func NewVMAgentPusher() *VMAgentPusher {
 	loadExtraLabels()
 
+	// Opt-in: without VMAGENT_PUSH_URL nothing is pushed
 	url := os.Getenv("VMAGENT_PUSH_URL")
-	if url == "" {
-		url = defaultVMAgentPushURL
-	}
 	return &VMAgentPusher{
 		url: url,
 		client: &http.Client{
@@ -290,6 +286,9 @@ func NewVMAgentPusher() *VMAgentPusher {
 }
 
 func (p *VMAgentPusher) PushPreempted(value float64) {
+	if p == nil || p.url == "" {
+		return
+	}
 	labels := MergeLabels(nil)
 	labels["event_type"] = "preempted"
 

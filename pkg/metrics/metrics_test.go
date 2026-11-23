@@ -475,3 +475,13 @@ func TestMergeLabelsLoadsExtraLabels(t *testing.T) {
 		t.Fatalf("extra label team = %q, want core", got)
 	}
 }
+
+// Without VMAGENT_PUSH_URL nothing is pushed and no push error is counted
+func TestVMAgentPushDisabledByDefault(t *testing.T) {
+	t.Setenv("VMAGENT_PUSH_URL", "")
+	before := testutil.ToFloat64(SidecarVMAgentPushErrorsTotal)
+	NewVMAgentPusher().PushPreempted(1)
+	if after := testutil.ToFloat64(SidecarVMAgentPushErrorsTotal); after != before {
+		t.Fatalf("push errors %v -> %v, the push must be disabled", before, after)
+	}
+}

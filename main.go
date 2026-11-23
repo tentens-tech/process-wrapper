@@ -73,7 +73,7 @@ Environment Variables:
   METRICS_JSON_EXTRA_LABELS: extra labels in JSON format, e.g {\"k8s_cluster\":\"test\"}
   METRICS_EXTRA_LABELS_FILE_PATH: extra pod labels mounted from kubernetes downwardAPI
   METRICS_EXTRA_LABELS_FILE_EXCLUDE: exclude some pod labels separated by comma, e.g. pod-template-hash,security.istio.io/tlsMode
-  VMAGENT_PUSH_URL: vmagent import url for the preempted metric, default is http://vmagent-vmagent.monitoring.svc.cluster.local:8429/api/v1/import/prometheus
+  VMAGENT_PUSH_URL: vmagent import url for the preempted metric, e.g. http://vmagent:8429/api/v1/import/prometheus; not set: the metric isn't pushed
   LOG_FORMAT: LOG_FORMAT=free, disable logfmt format; LOG_FORMAT=auto, autodetect severity level
   LOG_LEVELS: comma-separated allow-list of log levels forwarded from child processes, e.g. LOG_LEVELS=warning,error (supports debug, info, warning/warn, error/err). Applies to logfmt and LOG_FORMAT=auto; per-command 'logLevels' overrides this env
   AMQP_PROBE_RABBITMQ_DSN_TEMPLATE: amqp probe dsn template, e.g. 'amqp://%%v:%%v@localhost:5672'

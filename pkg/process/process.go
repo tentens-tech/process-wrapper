@@ -441,6 +441,23 @@ func (c *Command) AcquireSharedLock(ctx context.Context) {
 	}
 }
 
+// keepSharedLock keeps the shared lock of a command that has finished for
+// good (a completed job, restartPolicy: never) until shutdown: with the
+// lease expired, another instance would take the lock and run it again
+func (c *Command) keepSharedLock(ctx context.Context) {
+	if c.Readiness == nil || c.Readiness.KeepSharedLock == nil || c.Readiness.KeepSharedLock.Lease == "" {
+		return
+	}
+	period := c.Readiness.Period.Duration
+	if period <= 0 {
+		period = time.Second * ProbePeriodSeconds
+	}
+	log.WithFields(log.Fields{"name": c.Name}).Printf("Command finished, keep the shared lock until shutdown")
+	for c.sleepUnlessShutdown(ctx, period) {
+		c.Readiness.KeepSharedLock.Run(c.Name)
+	}
+}
+
 // Run executes command with ctx cancel context and restarts it until shutdown.
 // Each command runs unix signal handler and health check goroutines
 func (c *Command) Run(ctx context.Context, wg *sync.WaitGroup) {
@@ -556,6 +573,7 @@ func (c *Command) runOnce(ctx context.Context) bool {
 		// checker, which may still set it, has stopped. Exit code 0 is ready
 		<-healthDone
 		c.s.SetState(c.Name, exitCode == 0)
+		go c.keepSharedLock(ctx)
 		return false
 	}
 
@@ -579,6 +597,7 @@ func (c *Command) runOnce(ctx context.Context) bool {
 		// the health checker, which may still set the state, has stopped
 		<-healthDone
 		c.s.SetState(c.Name, true)
+		go c.keepSharedLock(ctx)
 		terminationLogger.Printf("Job completed, time %v", time.Since(startTime))
 		return false
 	}

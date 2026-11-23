@@ -118,7 +118,7 @@ Every file in [examples](examples) is self-contained and starts with a comment e
 | `HANDLE_PREEMPTION` | `true` enables Google Cloud preemption handling |
 | `METADATA_URL` | preemption metadata URL; if not set, `http://$NODE_NAME:9889/computeMetadata/v1/instance/preempted` (gke-metadata-server) is used when it responds, otherwise `http://metadata.google.internal/computeMetadata/v1/instance/preempted`. `?wait_for_change=true&timeout_sec=55` is appended |
 | `ENVOY_DRAIN_URL` | envoy admin [drain listeners](https://www.envoyproxy.io/docs/envoy/latest/operations/admin#post--drain_listeners) URL used with `-envoy-drain`, default `http://localhost:15000/drain_listeners?inboundonly` |
-| `VMAGENT_PUSH_URL` | VMAgent [import](https://docs.victoriametrics.com/vmagent/) URL for the `preempted` metric, default `http://vmagent-vmagent.monitoring.svc.cluster.local:8429/api/v1/import/prometheus` |
+| `VMAGENT_PUSH_URL` | VMAgent [import](https://docs.victoriametrics.com/vmagent/) URL for the `preempted` metric, e.g. `http://vmagent:8429/api/v1/import/prometheus`; not set — the metric isn't pushed |
 | `HANDLE_TERMINATION` | `true` makes the wrapper stop when the other containers of the pod are terminated (fast sidecar termination). Needs the pod service account to `get` pods in its namespace |
 | `METRICS_JSON_EXTRA_LABELS` | extra event labels in JSON, e.g. `{"k8s_cluster":"test"}` |
 | `METRICS_EXTRA_LABELS_FILE_PATH` | file with pod labels mounted from the downward API, added to events |
@@ -309,8 +309,8 @@ Labels: `pod` (`HOSTNAME`), `namespace` (`POD_NAMESPACE`), `node` (`NODE_NAME`),
 labels from `METRICS_EXTRA_LABELS_FILE_PATH`, and event-specific ones. The UDP metrics-server
 (`METRICS_SERVER_ADDRESS`) was removed.
 
-With `HANDLE_PREEMPTION` the wrapper also pushes the `preempted` metric (0 after every metadata poll,
-1 on preemption) to `VMAGENT_PUSH_URL`; failed pushes are counted in `sidecar_vmagent_push_errors_total`.
+With `HANDLE_PREEMPTION` and `VMAGENT_PUSH_URL` set, the wrapper also pushes the `preempted` metric (0 after every
+metadata poll, 1 on preemption) to `VMAGENT_PUSH_URL`; failed pushes are counted in `sidecar_vmagent_push_errors_total`.
 
 ### PHP profiling
 
@@ -327,7 +327,8 @@ or an authenticating proxy).
 
 `readiness.lock` makes a process a singleton across instances (e.g. pods of a deployment): before start the
 wrapper acquires a lease in the shared lock server and keeps it alive while the process runs; the other
-instances wait until the lease is released or expires. A waiting (standby) process is excluded from
+instances wait until the lease is released or expires. A completed job (`isJob`) or a `restartPolicy: never`
+process keeps the lease until the wrapper stops, so another instance doesn't run it again. A waiting (standby) process is excluded from
 `/readiness` and `/status`, so standby pods stay Ready and rolling updates don't get stuck.
 
 The lock server is a separate service, [tentens-tech/shared-lock](https://github.com/tentens-tech/shared-lock)

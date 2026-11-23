@@ -533,3 +533,40 @@ func TestAMQPProbeReconnectUsesCurrentEnvs(t *testing.T) {
 		t.Fatalf("the reconnect must use the current password, dsn %q", p.conn.dsn)
 	}
 }
+
+// A completed job keeps its shared lock until shutdown, so another instance
+// doesn't take the lock and run the job again
+func TestCompletedJobKeepsSharedLock(t *testing.T) {
+	stubJobFailed(t)
+	var keepalives atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == DefaultSharedLockKeepAliveEndpoint {
+			keepalives.Add(1)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte("1"))
+	}))
+	defer srv.Close()
+	old := SharedLockURL
+	SharedLockURL = srv.URL
+	t.Cleanup(func() { SharedLockURL = old })
+
+	s := newTestState()
+	c := &Command{
+		Name: "migrate", Entrypoint: "true", IsJob: true, s: s,
+		Readiness: &Probe{Period: Duration{20 * time.Millisecond}, KeepSharedLock: &LockProbe{}},
+	}
+	if c.runOnce(context.Background()) {
+		t.Fatal("a completed job must not be restarted")
+	}
+	after := keepalives.Load()
+	waitFor(t, "keepalives after the job completed", func() bool { return keepalives.Load() >= after+3 })
+	s.SetShutdown()
+	time.Sleep(100 * time.Millisecond)
+	stopped := keepalives.Load()
+	time.Sleep(200 * time.Millisecond)
+	if n := keepalives.Load(); n != stopped {
+		t.Fatalf("keepalives continue after shutdown: %v -> %v", stopped, n)
+	}
+}
