@@ -443,10 +443,12 @@ func TestJobStoppedOnContextCancel(t *testing.T) {
 func TestDNSBaselineTakenAtStart(t *testing.T) {
 	var mu sync.Mutex
 	addr := "192.0.2.1"
+	lookups := 0
 	old := lookupIP
 	lookupIP = func(context.Context, string) ([]net.IP, error) {
 		mu.Lock()
 		defer mu.Unlock()
+		lookups++
 		return []net.IP{net.ParseIP(addr)}, nil
 	}
 	t.Cleanup(func() { lookupIP = old })
@@ -460,14 +462,40 @@ func TestDNSBaselineTakenAtStart(t *testing.T) {
 		},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go c.HealthChecker(ctx, cancel, 0, nil)
-	time.Sleep(100 * time.Millisecond)
+	hcDone := make(chan struct{})
+	go func() { defer close(hcDone); c.HealthChecker(ctx, cancel, 0, nil) }()
+	// Stop the health checker before the cleanup restores lookupIP
+	defer func() { cancel(); <-hcDone }()
+	// Change the address once the baseline is taken, inside the delay
+	waitFor(t, "baseline lookup", func() bool { mu.Lock(); defer mu.Unlock(); return lookups > 0 })
 	mu.Lock()
 	addr = "192.0.2.2"
 	mu.Unlock()
 	time.Sleep(500 * time.Millisecond)
 	if s.ProcessState()["app"] {
 		t.Fatal("an address change during the readiness delay must fail the DNS probe")
+	}
+}
+
+// A graceful shutdown (shutdown state, ctx not cancelled yet) interrupts the
+// restart back-off at once
+func TestRestartBackoffInterruptedByGracefulShutdown(t *testing.T) {
+	s := newTestState()
+	c := &Command{
+		Name: "app", Entrypoint: "false",
+		RestartBackoff: &RestartBackoff{InitialDelay: Duration{time.Hour}, MaxDelay: Duration{time.Hour}},
+		s:              s,
+	}
+	done := make(chan bool)
+	go func() { done <- c.runOnce(context.Background()) }()
+	time.Sleep(200 * time.Millisecond)
+	s.SetShutdown()
+	select {
+	case restart := <-done:
+		if restart {
+			t.Fatal("a back-off interrupted by shutdown must not restart the command")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("back-off is not interrupted by a graceful shutdown")
 	}
 }

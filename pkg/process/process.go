@@ -610,9 +610,10 @@ func (c *Command) runOnce(ctx context.Context) bool {
 			Warnf("Restart command in %v (failures=%d)", delay, failures)
 		metrics.SidecarCmdReadinessCount.WithLabelValues("restart", c.Name, c.Entrypoint).Inc()
 
-		// SIGTERM during a long back-off must not stall graceful shutdown
-		if !sleepCtx(ctx, delay) {
-			terminationLogger.Warnf("Context cancelled during restart back-off, aborting restart")
+		// SIGTERM during a long back-off must not stall graceful shutdown:
+		// a graceful shutdown cancels ctx only after its deadline
+		if !c.sleepUnlessShutdown(ctx, delay) {
+			terminationLogger.Warnf("Shutdown during restart back-off, aborting restart")
 			return false
 		}
 		return !c.s.IsShutdown()
@@ -911,6 +912,24 @@ func checkStartable(cmd *exec.Cmd) error {
 }
 
 // sleepCtx sleeps for d and returns false if ctx is done earlier
+// sleepUnlessShutdown sleeps for d, it returns false early when ctx is
+// cancelled or a graceful shutdown starts
+func (c *Command) sleepUnlessShutdown(ctx context.Context, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for {
+		if c.s.IsShutdown() {
+			return false
+		}
+		left := time.Until(deadline)
+		if left <= 0 {
+			return true
+		}
+		if !sleepCtx(ctx, min(left, 100*time.Millisecond)) {
+			return false
+		}
+	}
+}
+
 func sleepCtx(ctx context.Context, d time.Duration) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()

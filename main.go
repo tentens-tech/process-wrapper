@@ -222,9 +222,27 @@ func StartProcessWrapper() {
 		AppName:      phpAppName,
 		RateHz:       phpRateHz,
 	}
+	// phpscope has its own context: it is stopped (with phpspy) and waited for
+	// before the wrapper exits, also on a graceful shutdown that ends before
+	// ctx is cancelled
+	phpCtx, phpCancel := context.WithCancel(ctx)
+	phpDone := make(chan struct{})
 	if phpCfg.Enabled() {
-		go phpscope.Run(ctx, phpCfg)
+		go func() {
+			defer close(phpDone)
+			phpscope.Run(phpCtx, phpCfg)
+		}()
+	} else {
+		close(phpDone)
 	}
+	defer func() {
+		phpCancel()
+		select {
+		case <-phpDone:
+		case <-time.After(5 * time.Second):
+			log.Warnf("phpscope didn't stop in 5s")
+		}
+	}()
 
 	var cfg config.Config
 	if configPath != "" {
