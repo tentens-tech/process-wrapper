@@ -3,7 +3,10 @@ package process
 import (
 	"context"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -338,5 +341,34 @@ func TestCompletedJobDoesNotBlockReadiness(t *testing.T) {
 	}
 	if _, ok := s.ProcessState()["job"]; ok || !s.Readiness() {
 		t.Fatalf("a completed job must not affect readiness: %v", s.ProcessState())
+	}
+}
+
+// A restart waits for the health checker of the previous run: no probe of
+// the old run is still in flight when the next run starts
+func TestRestartWaitsForHealthChecker(t *testing.T) {
+	var active atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		active.Add(1)
+		defer active.Add(-1)
+		time.Sleep(500 * time.Millisecond)
+	}))
+	defer srv.Close()
+	c := &Command{
+		Name: "app", Entrypoint: "sh", Args: []string{"-c", "sleep 0.2; exit 1"},
+		RestartBackoff: &RestartBackoff{InitialDelay: Duration{time.Millisecond}},
+		Readiness: &Probe{
+			Delay:            Duration{time.Millisecond},
+			Period:           Duration{10 * time.Millisecond},
+			FailureThreshold: 1000,
+			HTTP:             &HTTPProbe{URL: srv.URL},
+		},
+		s: newTestState(),
+	}
+	if !c.runOnce(context.Background()) {
+		t.Fatal("a failed command must be restarted")
+	}
+	if n := active.Load(); n != 0 {
+		t.Fatalf("%v probe(s) of the previous run still in flight at restart", n)
 	}
 }

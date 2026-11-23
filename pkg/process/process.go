@@ -587,8 +587,12 @@ func (c *Command) runOnce(ctx context.Context) bool {
 	// Restart command if exit code or HealthChecker routine/Memory limit handler killed the process
 	if !c.s.IsShutdown() || c.s.IsKilled(c.Name) {
 		c.s.SetKillState(c.Name, false)
-		// Stop HealthChecker/GetStats before the back-off: it may be long
+		// Stop HealthChecker/GetStats before the back-off: it may be long.
+		// Wait for the health checker: a probe still in flight must not reset
+		// the back-off armed for the next run or share probe state with it.
+		// A probe is bounded by its timeout and the process is already reaped
 		cancelRoutines()
+		<-healthDone
 
 		if time.Since(startTime) >= c.ResolveBackoff().SuccessThreshold.Duration {
 			c.ResetRestartBackoff("uptime")
