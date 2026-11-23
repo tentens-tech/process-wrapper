@@ -1,16 +1,23 @@
 package process
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"sort"
+	"time"
 )
+
+// DefaultDNSProbeTimeout bounds a single lookup of the DNS probe
+const DefaultDNSProbeTimeout = 5 * time.Second
 
 // DNSProbe fails when the address list of URL changes since the process
 // start, so the process is restarted after failureThreshold and connects to
 // the new addresses (e.g. a client that resolves a broker only once)
 type DNSProbe struct {
-	URL         string `yaml:"url"`
+	URL string `yaml:"url"`
+	// Timeout bounds a single lookup, default 5s
+	Timeout     Duration `yaml:"timeout"`
 	addressList []net.IP
 }
 
@@ -27,7 +34,7 @@ func (p *DNSProbe) Run(_ string) bool {
 	var err error
 
 	if p.addressList == nil {
-		p.addressList, err = getAddressListByURL(p.URL)
+		p.addressList, err = getAddressListByURL(p.URL, p.timeout())
 		return err == nil
 	}
 
@@ -36,7 +43,7 @@ func (p *DNSProbe) Run(_ string) bool {
 }
 
 func (p *DNSProbe) checkAddressListForChange() error {
-	currentAddressList, err := getAddressListByURL(p.URL)
+	currentAddressList, err := getAddressListByURL(p.URL, p.timeout())
 	if err != nil {
 		return err
 	}
@@ -79,8 +86,17 @@ func transformIPSliceToStringSlice(ips []net.IP) []string {
 	return strs
 }
 
-func getAddressListByURL(url string) (addressList []net.IP, err error) {
-	addressList, err = net.LookupIP(url)
+func (p *DNSProbe) timeout() time.Duration {
+	if p.Timeout.Duration > 0 {
+		return p.Timeout.Duration
+	}
+	return DefaultDNSProbeTimeout
+}
+
+func getAddressListByURL(url string, timeout time.Duration) (addressList []net.IP, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	addressList, err = net.DefaultResolver.LookupIP(ctx, "ip", url)
 	if err != nil {
 		return nil, err
 	}

@@ -278,3 +278,49 @@ func TestReadinessResetsRestartBackoff(t *testing.T) {
 		t.Fatalf("delay after reset %v, want initialDelay 1s", d)
 	}
 }
+
+func TestDNSProbeTimeout(t *testing.T) {
+	if (&DNSProbe{}).timeout() != DefaultDNSProbeTimeout {
+		t.Error("default DNS lookup timeout")
+	}
+	if (&DNSProbe{Timeout: Duration{time.Second}}).timeout() != time.Second {
+		t.Error("configured DNS lookup timeout")
+	}
+}
+
+// A broker that accepts TCP but never answers the AMQP handshake fails the
+// probe after operationsTimeout instead of hanging the health checker
+func TestAMQPProbeHandshakeTimeout(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+		}
+	}()
+	p := &AMQPProbe{
+		OperationsTimeout: Duration{300 * time.Millisecond},
+		Envs: map[string]string{
+			AMQPProbeDsnTemplateEnvName:  "amqp://%v:%v@" + ln.Addr().String(),
+			AMQPProbeRabbitMqUserEnvName: "u",
+			AMQPProbeRabbitMqPassEnvName: "p",
+		},
+	}
+	done := make(chan bool)
+	go func() { done <- p.Run("app") }()
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("a silent broker must fail the probe")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the AMQP handshake is not bounded by operationsTimeout")
+	}
+}

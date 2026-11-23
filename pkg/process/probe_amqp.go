@@ -120,7 +120,13 @@ func (p *AMQPProbe) connect(c *amqpProbeConn) error {
 			if err != nil {
 				return nil, err
 			}
-			// amqp091 has no operation timeouts: they are set as deadlines on the socket
+			// amqp091 has no operation timeouts: they are set as deadlines on
+			// the socket. The deadline covers the TLS and AMQP handshake and is
+			// cleared once the connection is up
+			if err := netConn.SetDeadline(time.Now().Add(timeout)); err != nil {
+				_ = netConn.Close()
+				return nil, err
+			}
 			c.netConn = netConn
 			return netConn, nil
 		},
@@ -128,6 +134,9 @@ func (p *AMQPProbe) connect(c *amqpProbeConn) error {
 	var err error
 	if c.connection, err = amqp.DialConfig(c.dsn, config); err != nil {
 		return err
+	}
+	if c.netConn != nil {
+		_ = c.netConn.SetDeadline(time.Time{})
 	}
 	if err = c.withDeadline(timeout, func() error {
 		var err error
@@ -145,16 +154,16 @@ func (p *AMQPProbe) connect(c *amqpProbeConn) error {
 	return nil
 }
 
-// withDeadline runs op with a read deadline on the connection socket
+// withDeadline runs op with a read and write deadline on the connection socket
 func (c *amqpProbeConn) withDeadline(timeout time.Duration, op func() error) error {
 	if c.netConn == nil {
 		return errors.New("no network connection")
 	}
-	if err := c.netConn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
-		return fmt.Errorf("set read deadline: %w", err)
+	if err := c.netConn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return fmt.Errorf("set deadline: %w", err)
 	}
 	err := op()
-	_ = c.netConn.SetReadDeadline(time.Time{})
+	_ = c.netConn.SetDeadline(time.Time{})
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return fmt.Errorf("operation timed out: %w", err)

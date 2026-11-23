@@ -31,7 +31,9 @@ const (
 	// Metadata server holds wait_for_change requests up to timeout_sec (55s)
 	metadataClientTimeout = 90 * time.Second
 	metadataRetryDelay    = 5 * time.Second
-	waitPollInterval      = time.Second
+	// Pause between metadata endpoint discovery rounds
+	metadataDiscoveryRetryDelay = time.Minute
+	waitPollInterval            = time.Second
 )
 
 // Health interface implements all probes
@@ -367,10 +369,18 @@ func (s *State) checkMetadataEndpoint(url string) bool {
 }
 
 func (s *State) WaitPreemptionState() {
-	metadataURL, err := s.determineMetadataEndpointWithRetry(defaultMetadataMaxRetries, defaultMetadataRetryInterval)
-	if err != nil {
-		log.Errorf("Failed to determine preemption metadata endpoint: %v", err)
-		return
+	// Keep looking for the metadata endpoint: a metadata server that comes
+	// up late (or a transient network failure) must not disable preemption
+	// handling for the lifetime of the pod
+	var metadataURL string
+	for {
+		var err error
+		metadataURL, err = s.determineMetadataEndpointWithRetry(defaultMetadataMaxRetries, defaultMetadataRetryInterval)
+		if err == nil {
+			break
+		}
+		log.Errorf("Failed to determine preemption metadata endpoint, retry in %v: %v", metadataDiscoveryRetryDelay, err)
+		time.Sleep(metadataDiscoveryRetryDelay)
 	}
 	log.Infof("Selected metadata endpoint: %s", metadataURL)
 

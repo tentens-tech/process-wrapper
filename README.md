@@ -234,7 +234,7 @@ are killed. Descendants that create their own session (`setsid`) are not tracked
 | `env` | `name`, `value` | the wrapper's env `name` equals `value` |
 | `sql` | `envs`, `queries`, `contains` | every query succeeds within 10s and the first column contains the expected values |
 | `amqp` | `envs`, `operationsTimeout` (`5s`), `tlsInsecureSkipVerify` | `basic.get` on the durable `amqp-probe-queue` queue succeeds; the connection is kept open between checks (`reuseConn` is deprecated) |
-| `dns` | `url` (a host name) | the name resolves to the same addresses as when the process started; when they change the process is restarted after `failureThreshold` |
+| `dns` | `url` (a host name), `timeout` (lookup timeout, default 5s) | the name resolves to the same addresses as when the process started; when they change the process is restarted after `failureThreshold` |
 | `floatingPid` | `period` (`10s`), `threshold` (`1`) | the process wasn't started more than `threshold` times within `period` (the default allows no restarts within 10s) |
 | `heartBeat` | `period` (`30s`) | the process sent a heartbeat (`PATCH /heartbeat?name=<name>`) within `period` |
 | `lock` | `ttlDuration` (`2s`) | the shared lock lease is kept alive (see "Shared lock") |
@@ -318,6 +318,9 @@ With `HANDLE_PREEMPTION` the wrapper also pushes the `preempted` metric (0 after
 restarted when it exits (`sidecar_phpscope_restarts_total`). The default image doesn't contain phpscope/phpspy
 (if the binary is missing, an error is logged and profiling is disabled), the process needs `SYS_PTRACE` and
 must see the PHP processes. See [php-profiling.yaml](examples/php-profiling.yaml).
+The URL is passed to phpscope as a command-line argument and is visible in the process list: don't put
+credentials into it, send profiles to an endpoint without authentication (e.g. an in-cluster Pyroscope
+or an authenticating proxy).
 
 ### Shared lock
 
