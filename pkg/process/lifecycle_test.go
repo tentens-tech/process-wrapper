@@ -570,3 +570,44 @@ func TestCompletedJobKeepsSharedLock(t *testing.T) {
 		t.Fatalf("keepalives continue after shutdown: %v -> %v", stopped, n)
 	}
 }
+
+// Debug lines allowed by logLevels are forwarded at the default wrapper log
+// level, in logfmt and in logFormat: auto
+func TestLogLevelsDebugForwarded(t *testing.T) {
+	hook := logtest.NewGlobal()
+	defer hook.Reset()
+	if log.GetLevel() >= log.DebugLevel {
+		t.Skip("the wrapper log level must be info")
+	}
+	c := &Command{Name: "app", LogLevels: []string{"debug"}}
+	c.logOutputLine(`level=debug msg="logfmt debug"`, "", 1)
+	c.logOutputLine(`level=info msg="logfmt info"`, "", 1)
+	c.logOutputLine("DEBUG auto debug", "auto", 1)
+	c.logOutputLine("auto info", "auto", 1)
+
+	var got []string
+	for _, e := range hook.AllEntries() {
+		got = append(got, e.Message)
+	}
+	want := []string{"logfmt debug", "DEBUG auto debug"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("forwarded %q, want %q", got, want)
+	}
+}
+
+// Without a filter, debug lines keep the wrapper log level
+func TestDebugLinesWithoutFilter(t *testing.T) {
+	hook := logtest.NewGlobal()
+	defer hook.Reset()
+	t.Setenv(LogLevelsEnv, "")
+	c := &Command{Name: "app"}
+	c.logOutputLine(`level=debug msg="logfmt debug"`, "", 1)
+	c.logOutputLine("DEBUG auto debug", "auto", 1)
+	var got []string
+	for _, e := range hook.AllEntries() {
+		got = append(got, e.Message)
+	}
+	if strings.Join(got, "|") != "DEBUG auto debug" {
+		t.Fatalf("forwarded %q", got)
+	}
+}

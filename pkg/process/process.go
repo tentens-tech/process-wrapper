@@ -1033,6 +1033,7 @@ func (c *Command) logOutputLine(out, logFormat string, pid int) {
 				return
 			}
 			logger := log.WithFields(log.Fields{"name": c.Name, "pid": pid, "out": "stdout"})
+			// Debug lines are forwarded at info, as before the debug detection
 			switch autoLevel {
 			case LogLevelError:
 				logger.Errorf("%v", out)
@@ -1057,7 +1058,13 @@ func (c *Command) logOutputLine(out, logFormat string, pid int) {
 	case LogLevelError:
 		logger.Errorf("%v", message)
 	case LogLevelDebug:
-		logger.Debugf("%v", message)
+		// Debug lines allowed explicitly by logLevels / LOG_LEVELS are
+		// forwarded whatever the wrapper log level (severity keeps "debug")
+		if levelEnabledExplicitly(levels, LogLevelDebug) {
+			logger.Printf("%v", message)
+		} else {
+			logger.Debugf("%v", message)
+		}
 	default:
 		logger.Printf("%v", message)
 	}

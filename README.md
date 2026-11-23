@@ -286,9 +286,9 @@ Lines longer than 64 KiB are logged in parts.
 
 `logLevels` (or the `LOG_LEVELS` env for all processes, comma-separated) forwards only the listed levels:
 `debug`, `info`, `warning` (`warn`), `error` (`err`, `critical`, `fatal`, `panic`). It applies to logfmt lines
-and to `logFormat: auto` (where the level is detected by the `CRITICAL`/`ERROR`/`FATAL`/`PANIC` and `WARNING`
-keywords, case-insensitive); other lines are never filtered. `logLevels` of a process overrides `LOG_LEVELS`,
-both empty disable the filter. See [log-levels.yaml](examples/log-levels.yaml).
+and to `logFormat: auto` (where the level is detected by the `CRITICAL`/`ERROR`/`FATAL`/`PANIC`, `WARNING` and
+`DEBUG` keywords, case-insensitive); other lines are never filtered. Debug lines listed in the filter are forwarded
+whatever the wrapper log level. `logLevels` of a process overrides `LOG_LEVELS`, both empty disable the filter. See [log-levels.yaml](examples/log-levels.yaml).
 
 ### Events
 

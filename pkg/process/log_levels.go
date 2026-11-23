@@ -94,9 +94,18 @@ func levelEnabled(set map[string]struct{}, normalizedLevel string) bool {
 	return ok
 }
 
+// levelEnabledExplicitly reports whether an active filter lists the level
+func levelEnabledExplicitly(set map[string]struct{}, normalizedLevel string) bool {
+	if set == nil {
+		return false
+	}
+	_, ok := set[normalizedLevel]
+	return ok
+}
+
 // detectAutoLevel mirrors the LOG_FORMAT=auto heuristic used by
 // ProcessOutput: high-severity keywords (CRITICAL/ERROR/FATAL/PANIC) map to
-// error, "WARNING" to warning, and everything else to info.
+// error, "WARNING" to warning, "DEBUG" to debug and everything else to info.
 func detectAutoLevel(line string) string {
 	if containsCaseInsensitive(line, "CRITICAL") ||
 		containsCaseInsensitive(line, "ERROR") ||
@@ -106,6 +115,9 @@ func detectAutoLevel(line string) string {
 	}
 	if containsCaseInsensitive(line, "WARNING") {
 		return LogLevelWarning
+	}
+	if containsCaseInsensitive(line, "DEBUG") {
+		return LogLevelDebug
 	}
 	return LogLevelInfo
 }
