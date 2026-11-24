@@ -2,3 +2,7 @@
 pid
 pw
 process-wrapper
+coverage.out
+junit.xml
+dist/
+bin/

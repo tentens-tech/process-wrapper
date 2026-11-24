@@ -1,0 +1,11 @@
+# Build outputs and local files that aren't needed to build the image.
+# .git is kept, so `git describe` can set the version of local builds.
+process-wrapper
+pw
+pid
+coverage.out
+junit.xml
+dist/
+test/e2e/.logs/
+.idea/
+.vscode/

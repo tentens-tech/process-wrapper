@@ -1,0 +1,314 @@
+name: Release
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v1.0.0). Leave empty to use latest tag.'
+        required: false
+        type: string
+      force:
+        description: 'Overwrite an existing release'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  setup:
+    name: Setup Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Required to delete an existing release with force
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Resolve tag
+        id: resolve
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [ "$EVENT" = "push" ]; then
+            TAG="$REF_NAME"
+          elif [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG=$(git tag --list 'v*' --sort=-version:refname | head -1)
+            if [ -z "$TAG" ]; then
+              echo "::error::No tag found. Please specify a tag or create one first."
+              exit 1
+            fi
+          fi
+          if ! echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Tag '$TAG' doesn't look like vX.Y.Z"
+            exit 1
+          fi
+          if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::Tag $TAG doesn't exist"
+            exit 1
+          fi
+          echo "Resolved tag: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          case "$TAG" in *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;; *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;; esac
+
+      - name: Check existing release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          if gh release view "$TAG" &>/dev/null; then
+            if [ "$FORCE" = "true" ]; then
+              echo "Deleting existing release $TAG"
+              gh release delete "$TAG" --yes
+            else
+              echo "::error::Release $TAG already exists, run the workflow with force to overwrite it"
+              exit 1
+            fi
+          fi
+
+  test:
+    name: Test
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.setup.outputs.tag }}
+
+      - name: Setup Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: go test -race ./...
+
+  binaries:
+    name: Binaries
+    needs: [setup, test]
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ needs.setup.outputs.tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.setup.outputs.tag }}
+
+      - name: Setup Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build binaries
+        run: |
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            name="process-wrapper_${RELEASE_TAG}_linux_${arch}"
+            mkdir -p "build/$name"
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath \
+              -ldflags "-s -w -X 'main.version=${RELEASE_TAG}'" \
+              -o "build/$name/process-wrapper" main.go
+            cp LICENSE README.md "build/$name/"
+            tar -C "build/$name" -czf "dist/$name.tar.gz" process-wrapper LICENSE README.md
+          done
+          ls -la dist/
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: binaries
+          path: dist/
+
+  # Every image is built on a native runner, so the RUN steps of the final
+  # stage don't need emulation.
+  build-docker:
+    name: Docker ${{ matrix.arch }}
+    needs: [setup, test]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      RELEASE_TAG: ${{ needs.setup.outputs.tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.setup.outputs.tag }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push ${{ matrix.arch }}
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: deployment/docker/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.RELEASE_TAG }}-${{ matrix.arch }}
+          build-args: |
+            VERSION=${{ env.RELEASE_TAG }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+  # Create multi-arch manifest
+  docker-manifest:
+    name: Docker Manifest
+    needs: [setup, build-docker]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      RELEASE_TAG: ${{ needs.setup.outputs.tag }}
+      PRERELEASE: ${{ needs.setup.outputs.prerelease }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push version manifest
+        run: |
+          IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          docker buildx imagetools create -t "$IMAGE:$RELEASE_TAG" "$IMAGE:$RELEASE_TAG-amd64" "$IMAGE:$RELEASE_TAG-arm64"
+
+      - name: Create and push latest manifest
+        if: env.PRERELEASE != 'true'
+        run: |
+          IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$RELEASE_TAG-amd64" "$IMAGE:$RELEASE_TAG-arm64"
+
+  release:
+    name: Create Release
+    needs: [setup, binaries, docker-manifest]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ needs.setup.outputs.tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.setup.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Download binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: binaries
+          path: release
+
+      - name: Generate checksums
+        working-directory: release
+        run: |
+          sha256sum -- *.tar.gz > checksums.txt
+          cat checksums.txt
+
+      - name: Generate release notes
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          PREVIOUS_TAG=$(git tag --list 'v*' --sort=-version:refname | grep -vx "$RELEASE_TAG" \
+            | while read -r t; do git merge-base --is-ancestor "$t" "$RELEASE_TAG" && { echo "$t"; break; }; done)
+
+          cat > release_notes.md << NOTES
+          Process manager for containers: runs several processes in one container, checks their health,
+          restarts unhealthy ones and exposes the overall state to Kubernetes.
+
+          ### 📦 Docker Image
+
+          \`\`\`bash
+          docker pull ghcr.io/$REPO:$RELEASE_TAG
+          \`\`\`
+
+          Use the binary in your own image:
+
+          \`\`\`dockerfile
+          COPY --from=ghcr.io/$REPO:$RELEASE_TAG /usr/bin/process-wrapper /usr/bin/process-wrapper
+          \`\`\`
+
+          ### ⬇️ Binary
+
+          \`\`\`bash
+          curl -fsSL https://github.com/$REPO/releases/download/$RELEASE_TAG/process-wrapper_${RELEASE_TAG}_linux_amd64.tar.gz | tar xz process-wrapper
+          \`\`\`
+
+          Binaries for linux/amd64 and linux/arm64 and their \`checksums.txt\` are attached below.
+
+          ### 🔧 What's Changed
+
+          NOTES
+
+          {
+            if [ -n "$PREVIOUS_TAG" ]; then
+              echo "Changes since $PREVIOUS_TAG:"
+              echo ""
+              git log --pretty=format:"- %s (%h)" "$PREVIOUS_TAG..$RELEASE_TAG" --no-merges
+              echo ""
+            else
+              echo "First release on GitHub, see the [README](https://github.com/$REPO#readme) for the full feature list."
+            fi
+          } >> release_notes.md
+
+          cat >> release_notes.md << NOTES
+
+          ### 📚 Documentation
+
+          - [README](https://github.com/$REPO/blob/$RELEASE_TAG/README.md)
+          - [Examples](https://github.com/$REPO/tree/$RELEASE_TAG/examples)
+          - [Tests](https://github.com/$REPO/blob/$RELEASE_TAG/test/README.md)
+          NOTES
+
+          cat release_notes.md
+
+      - name: Create Release
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: process-wrapper ${{ env.RELEASE_TAG }}
+          body_path: release_notes.md
+          files: |
+            release/*
+          draft: false
+          prerelease: ${{ needs.setup.outputs.prerelease == 'true' }}
