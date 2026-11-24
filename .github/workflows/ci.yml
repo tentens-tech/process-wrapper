@@ -15,20 +15,10 @@ on:
       - 'examples/**'
       - 'test/**'
       - '.github/workflows/ci.yml'
+  # Every PR runs CI, so its checks can be required by the branch ruleset:
+  # a required check that doesn't run would block the merge.
   pull_request:
     branches: [ main ]
-    paths:
-      - '**.go'
-      - '**/testdata/**'
-      - 'go.mod'
-      - 'go.sum'
-      - 'deployment/**'
-      - 'Makefile'
-      - '.golangci.yml'
-      - '.dockerignore'
-      - 'examples/**'
-      - 'test/**'
-      - '.github/workflows/ci.yml'
   workflow_dispatch:
 
 concurrency:
