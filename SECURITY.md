@@ -51,7 +51,7 @@ and `PATCH /heartbeat` changes the state of `heartBeat` probes.
 
 ### Processes and Privileges
 
-- The image runs as an unprivileged user (UID/GID `1010`) and supports a read-only root filesystem.
+- The images run as an unprivileged user (UID/GID `1010`). The slim image supports a read-only root filesystem.
 - Supervised commands, `postStart` command hooks and `exec` probes run with the identity, working directory and
   process attributes of the supervised command.
 - `sysProcAttr` options that switch credentials or use `chroot` need root or the corresponding capabilities.

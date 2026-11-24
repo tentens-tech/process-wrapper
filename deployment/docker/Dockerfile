@@ -1,63 +1,118 @@
-# The builder runs on the build host and cross-compiles for the target
-# platform, so a multi-arch build doesn't need emulation.
-FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS builder
+# Full image: process-wrapper with the sidecars it usually supervises (envoy,
+# proxysql, amqproxy, gomcrouter, exporters, the PHP profiler) on debian:12-slim.
+# deployment/docker/Dockerfile-slim builds an image with process-wrapper only.
+#
+# Go stages run on the build host and cross-compile for the target platform.
+# The other stages and the final stage run on the target platform.
 
-ARG BUILDARCH
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS process-wrapper
 ARG TARGETOS=linux
 ARG TARGETARCH
 # Version reported by `process-wrapper -version`. When empty, it's taken from
 # `git describe` if the build context has .git, otherwise "unknown".
 ARG VERSION=""
-ARG upx_version=5.3.0
-# sha256 of upx-${upx_version}-<arch>_linux.tar.xz, update together with upx_version
-ARG upx_sha256_amd64=79cea8a50b6fa102d10c7b79a419cd77dead3cc2d78661de2dc5e5815dc505c1
-ARG upx_sha256_arm64=2a4afa860ac7aa6968f88df7841823746e5d00ba56affdf9342c2f5254fb776f
 ARG GOPROXY=https://proxy.golang.org
-
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-# hadolint ignore=DL3008
-RUN case "${BUILDARCH}" in \
-      amd64) upx_sha256=${upx_sha256_amd64} ;; \
-      arm64) upx_sha256=${upx_sha256_arm64} ;; \
-      *) echo "unsupported build arch ${BUILDARCH}" >&2; exit 1 ;; \
-    esac && \
-  apt-get update && apt-get install -y --no-install-recommends xz-utils && \
-  curl -fsSL "https://github.com/upx/upx/releases/download/v${upx_version}/upx-${upx_version}-${BUILDARCH}_linux.tar.xz" -o /tmp/upx.tar.xz && \
-  echo "${upx_sha256}  /tmp/upx.tar.xz" | sha256sum -c - && \
-  tar xJf /tmp/upx.tar.xz -C /tmp && \
-  install -m 0755 "/tmp/upx-${upx_version}-${BUILDARCH}_linux/upx" /usr/local/bin/upx && \
-  rm -rf /tmp/upx* /var/lib/apt/lists/*
-
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download && go mod verify
 COPY . /app
-
 RUN VERSION=${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo unknown)}; \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -o app -ldflags="-s -w -X 'main.version=${VERSION}'" main.go && \
-    /usr/local/bin/upx --best --lzma app
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -o app -ldflags="-s -w -X 'main.version=${VERSION}'" main.go
 
-FROM alpine:3.24 AS process-wrapper
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS metrics-server
+ARG TARGETARCH
+ARG metrics_server_commit=552e808cc0da2ff9e74a9360a012eb8c334b78fc
+ARG GOPROXY=https://proxy.golang.org
+RUN git clone https://github.com/tentens-tech/metrics-server.git /src && \
+    cd /src && git checkout ${metrics_server_commit} && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -o /app -ldflags="-s -w" .
 
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS mcrouter-exporter
+ARG TARGETARCH
+ARG mcrouter_exporter_version=0.4.0
+ARG GOPROXY=https://proxy.golang.org
+RUN git clone --depth 1 --branch ${mcrouter_exporter_version} https://github.com/Dev25/mcrouter_exporter.git /src && \
+    cd /src && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -o /app -ldflags="-s -w" main.go
+
+# phpspy in hiload/phpscope is dynamically linked against musl libc and won't run
+# on debian. Rebuild it statically from upstream source.
+FROM alpine:3.23 AS phpspy-builder
+ARG phpspy_version=0.7.0
+RUN apk add --no-cache git make gcc musl-dev && \
+    git clone --depth 1 --branch v${phpspy_version} https://github.com/adsr/phpspy.git /phpspy && \
+    cd /phpspy && LDFLAGS="-static" make
+
+FROM ghcr.io/tentens-tech/gomcrouter:v1.3.3 AS gomcrouter
+FROM envoyproxy/envoy:v1.34.2 AS envoy
+FROM hiload/phpscope:v0.1.3 AS phpscope
+
+FROM debian:12-slim AS process-wrapper-full
+ARG TARGETARCH
 ARG VERSION=""
+ARG upx_version=5.3.0
+# sha256 of upx-${upx_version}-<arch>_linux.tar.xz, update together with upx_version
+ARG upx_sha256_amd64=79cea8a50b6fa102d10c7b79a419cd77dead3cc2d78661de2dc5e5815dc505c1
+ARG upx_sha256_arm64=2a4afa860ac7aa6968f88df7841823746e5d00ba56affdf9342c2f5254fb776f
+ARG amqproxy_version=3.2.2-1
+ARG proxysql_version=3.0.2
+ARG UID=1010
+ARG GID=1010
+ENV GOMAXPROCS=2
+
 LABEL org.opencontainers.image.title="process-wrapper" \
-      org.opencontainers.image.description="Process manager for containers" \
+      org.opencontainers.image.description="Process manager for containers, with sidecars" \
       org.opencontainers.image.source="https://github.com/tentens-tech/process-wrapper" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="${VERSION}"
 
-# Unprivileged runtime user. Numeric UID/GID so that Kubernetes
-# `runAsNonRoot: true` can verify it without resolving names.
-ARG UID=1010
-ARG GID=1010
-RUN addgroup -S -g "${GID}" appuser && \
-    adduser -S -D -H -u "${UID}" -G appuser -h /nonexistent -s /sbin/nologin appuser
+COPY --from=process-wrapper /app/app /usr/bin/process-wrapper
+COPY --from=metrics-server /app /usr/bin/metrics-server
+COPY --from=mcrouter-exporter /app /usr/bin/mcrouter-exporter
+COPY --from=gomcrouter /bin/gomcrouter /usr/bin/gomcrouter
+COPY --from=envoy /usr/local/bin/envoy /usr/bin/envoy
+COPY --from=phpscope /usr/local/bin/phpscope /usr/bin/phpscope
+COPY --from=phpspy-builder /phpspy/phpspy /usr/bin/phpspy
 
-# The binary is owned by root and read-only for everyone, so the runtime user
-# can't modify it. The image is designed for a read-only root filesystem:
-# the only paths process-wrapper writes to are -readiness-file (default
-# /tmp/started) and -pid-file, so mount a writable /tmp (tmpfs / emptyDir).
-COPY --from=builder --chown=0:0 --chmod=0555 /app/app /usr/bin/process-wrapper
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+# Install proxysql and amqproxy, then strip and compress the binaries with UPX
+# and remove the build tools.
+# hadolint ignore=DL3008
+RUN case "${TARGETARCH}" in \
+      amd64) upx_sha256=${upx_sha256_amd64} ;; \
+      arm64) upx_sha256=${upx_sha256_arm64} ;; \
+      *) echo "unsupported arch ${TARGETARCH}" >&2; exit 1 ;; \
+    esac && \
+    apt-get update && apt-get install -y --no-install-recommends \
+      binutils \
+      xz-utils \
+      curl \
+      lsb-release \
+      gnupg \
+      ca-certificates \
+      procps && \
+    curl -fsSL "https://github.com/upx/upx/releases/download/v${upx_version}/upx-${upx_version}-${TARGETARCH}_linux.tar.xz" -o /tmp/upx.tar.xz && \
+    echo "${upx_sha256}  /tmp/upx.tar.xz" | sha256sum -c - && \
+    tar xJf /tmp/upx.tar.xz -C /tmp && \
+    install -m 0755 "/tmp/upx-${upx_version}-${TARGETARCH}_linux/upx" /usr/local/bin/upx && \
+    curl -fsSL "https://repo.proxysql.com/ProxySQL/proxysql-3.0.x/repo_pub_key.gpg" -o /etc/apt/trusted.gpg.d/proxysql-3.0.x-keyring.gpg && \
+    echo "deb https://repo.proxysql.com/ProxySQL/proxysql-3.0.x/$(lsb_release -sc)/ ./" > /etc/apt/sources.list.d/proxysql.list && \
+    curl -fsSL https://packagecloud.io/cloudamqp/amqproxy/gpgkey | gpg --dearmor > /usr/share/keyrings/amqproxy.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/amqproxy.gpg] https://packagecloud.io/cloudamqp/amqproxy/debian bookworm main" > /etc/apt/sources.list.d/amqproxy.list && \
+    apt-get update && \
+    apt-get install -y systemd-sysv "proxysql=${proxysql_version}" "amqproxy=${amqproxy_version}" && \
+    BINARIES="/usr/bin/proxysql /usr/bin/envoy /usr/bin/mcrouter-exporter /usr/bin/metrics-server \
+      /usr/bin/gomcrouter /usr/bin/amqproxy /usr/bin/process-wrapper /usr/bin/phpscope \
+      /bin/systemctl /bin/tar /lib/systemd/systemd-networkd /lib/systemd/systemd /usr/bin/openssl" && \
+    LARGE=$(find /usr/bin/gpg* /usr/bin/perl* -type f -size +100k -executable) && \
+    for b in $BINARIES /usr/bin/phpspy $LARGE; do strip "$b" 2>/dev/null || true; done && \
+    for b in $BINARIES $LARGE; do upx -q --best --lzma "$b" >/dev/null; done && \
+    rm -f /usr/share/doc/libboost*/copyright && \
+    apt-get remove -y binutils xz-utils curl lsb-release gnupg && \
+    apt-get autoremove -y && \
+    rm -f /usr/local/bin/upx && \
+    rm -rf /tmp/* /var/lib/apt/lists/* /var/cache/* && \
+    groupadd --gid "${GID}" appuser && \
+    useradd --uid "${UID}" --gid "${GID}" --no-create-home --shell /usr/sbin/nologin appuser
 
-WORKDIR /tmp
 USER ${UID}:${GID}

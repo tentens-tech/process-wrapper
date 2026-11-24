@@ -252,10 +252,18 @@ jobs:
           retention-days: 7
 
   docker-build:
-    name: Docker Build
+    name: Docker Build (${{ matrix.variant }})
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: full
+            dockerfile: deployment/docker/Dockerfile
+          - variant: slim
+            dockerfile: deployment/docker/Dockerfile-slim
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -267,19 +275,31 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          file: deployment/docker/Dockerfile
+          file: ${{ matrix.dockerfile }}
           push: false
           load: true
           tags: process-wrapper:ci
           build-args: |
             VERSION=dev-${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
 
       - name: Verify image
         run: |
           docker run --rm process-wrapper:ci process-wrapper -version
           test "$(docker run --rm process-wrapper:ci id -u)" = 1010
+
+      - name: Verify sidecars
+        if: matrix.variant == 'full'
+        run: |
+          docker run --rm process-wrapper:ci sh -ec '
+            envoy --version
+            proxysql --version
+            amqproxy --version
+            phpspy -v
+            for b in metrics-server mcrouter-exporter gomcrouter phpscope; do
+              test -x "/usr/bin/$b" && echo "$b: ok"
+            done'
 
   e2e:
     name: End-to-end Tests
