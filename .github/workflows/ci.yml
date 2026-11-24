@@ -63,7 +63,9 @@ jobs:
           fi
           # Documentation: Markdown files and the files that only configure docs and issues
           DOCS='(\.md$|^LICENSE$|^\.github/ISSUE_TEMPLATE/|^\.markdownlint\.json$|^\.lycheeignore$|^\.github/workflows/docs\.yml$)'
-          CODE_FILES=$(git diff --name-only "$BASE_SHA...$HEAD_SHA" | grep -Ev "$DOCS" || true)
+          # A failed diff must fail the job, not skip the checks
+          CHANGED=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
+          CODE_FILES=$(echo "$CHANGED" | grep -Ev "$DOCS" || true)
           if [ -n "$CODE_FILES" ]; then
             echo "Code changes:"
             echo "$CODE_FILES"
