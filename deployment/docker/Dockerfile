@@ -1,5 +1,5 @@
 # Full image: process-wrapper with the sidecars it usually supervises (envoy,
-# proxysql, amqproxy, gomcrouter, exporters, the PHP profiler) on debian:12-slim.
+# proxysql, amqproxy, gomcrouter, the PHP profiler) on debian:12-slim.
 # deployment/docker/Dockerfile-slim builds an image with process-wrapper only.
 #
 # Go stages run on the build host and cross-compile for the target platform.
@@ -18,22 +18,6 @@ RUN go mod download && go mod verify
 COPY . /app
 RUN VERSION=${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo unknown)}; \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -o app -ldflags="-s -w -X 'main.version=${VERSION}'" main.go
-
-FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS metrics-server
-ARG TARGETARCH
-ARG metrics_server_commit=552e808cc0da2ff9e74a9360a012eb8c334b78fc
-ARG GOPROXY=https://proxy.golang.org
-RUN git clone https://github.com/tentens-tech/metrics-server.git /src && \
-    cd /src && git checkout ${metrics_server_commit} && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -o /app -ldflags="-s -w" .
-
-FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS mcrouter-exporter
-ARG TARGETARCH
-ARG mcrouter_exporter_version=0.4.0
-ARG GOPROXY=https://proxy.golang.org
-RUN git clone --depth 1 --branch ${mcrouter_exporter_version} https://github.com/Dev25/mcrouter_exporter.git /src && \
-    cd /src && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -o /app -ldflags="-s -w" main.go
 
 # phpspy in hiload/phpscope is dynamically linked against musl libc and won't run
 # on debian. Rebuild it statically from upstream source.
@@ -67,8 +51,6 @@ LABEL org.opencontainers.image.title="process-wrapper" \
       org.opencontainers.image.version="${VERSION}"
 
 COPY --from=process-wrapper /app/app /usr/bin/process-wrapper
-COPY --from=metrics-server /app /usr/bin/metrics-server
-COPY --from=mcrouter-exporter /app /usr/bin/mcrouter-exporter
 COPY --from=gomcrouter /bin/gomcrouter /usr/bin/gomcrouter
 COPY --from=envoy /usr/local/bin/envoy /usr/bin/envoy
 COPY --from=phpscope /usr/local/bin/phpscope /usr/bin/phpscope
@@ -101,7 +83,7 @@ RUN case "${TARGETARCH}" in \
     echo "deb [signed-by=/usr/share/keyrings/amqproxy.gpg] https://packagecloud.io/cloudamqp/amqproxy/debian bookworm main" > /etc/apt/sources.list.d/amqproxy.list && \
     apt-get update && \
     apt-get install -y systemd-sysv "proxysql=${proxysql_version}" "amqproxy=${amqproxy_version}" && \
-    BINARIES="/usr/bin/proxysql /usr/bin/envoy /usr/bin/mcrouter-exporter /usr/bin/metrics-server \
+    BINARIES="/usr/bin/proxysql /usr/bin/envoy \
       /usr/bin/gomcrouter /usr/bin/amqproxy /usr/bin/process-wrapper /usr/bin/phpscope \
       /bin/systemctl /bin/tar /lib/systemd/systemd-networkd /lib/systemd/systemd /usr/bin/openssl" && \
     LARGE=$(find /usr/bin/gpg* /usr/bin/perl* -type f -size +100k -executable) && \

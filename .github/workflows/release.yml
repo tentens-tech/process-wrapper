@@ -289,7 +289,7 @@ jobs:
           ### 📦 Docker Images
 
           \`\`\`bash
-          # process-wrapper with sidecars (envoy, proxysql, amqproxy, gomcrouter, exporters, phpscope)
+          # process-wrapper with sidecars (envoy, proxysql, amqproxy, gomcrouter, phpscope)
           docker pull ghcr.io/$REPO:$RELEASE_TAG
           # process-wrapper only
           docker pull ghcr.io/$REPO:$RELEASE_TAG-slim

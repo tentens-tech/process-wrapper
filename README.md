@@ -447,8 +447,6 @@ The full image is based on `debian:12-slim` and contains, besides process-wrappe
 | `proxysql` | [ProxySQL](https://proxysql.com/) |
 | `amqproxy` | [AMQProxy](https://github.com/cloudamqp/amqproxy) |
 | `gomcrouter` | [gomcrouter](https://github.com/tentens-tech/gomcrouter) |
-| `mcrouter-exporter` | [mcrouter exporter](https://github.com/Dev25/mcrouter_exporter) |
-| `metrics-server` | [metrics-server](https://github.com/tentens-tech/metrics-server) |
 | `phpscope`, `phpspy` | PHP profiling, see `-php-pyroscope-url` |
 
 `GOMAXPROCS` is set to `2`. Both images run as the user `1010`.

@@ -297,7 +297,7 @@ jobs:
             proxysql --version
             amqproxy --version
             phpspy -v
-            for b in metrics-server mcrouter-exporter gomcrouter phpscope; do
+            for b in gomcrouter phpscope; do
               test -x "/usr/bin/$b" && echo "$b: ok"
             done'
 
