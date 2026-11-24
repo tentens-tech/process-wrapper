@@ -253,8 +253,14 @@ jobs:
         env:
           REPO: ${{ github.repository }}
         run: |
-          PREVIOUS_TAG=$(git tag --list 'v*' --sort=-version:refname | grep -vx "$RELEASE_TAG" \
-            | while read -r t; do git merge-base --is-ancestor "$t" "$RELEASE_TAG" && { echo "$t"; break; }; done)
+          # The newest v* tag that is an ancestor of this release; empty for the first release.
+          PREVIOUS_TAG=""
+          for t in $(git tag --list 'v*' --sort=-version:refname); do
+            if [ "$t" != "$RELEASE_TAG" ] && git merge-base --is-ancestor "$t" "$RELEASE_TAG"; then
+              PREVIOUS_TAG=$t
+              break
+            fi
+          done
 
           cat > release_notes.md << NOTES
           Process manager for containers: runs several processes in one container, checks their health,
