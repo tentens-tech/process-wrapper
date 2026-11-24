@@ -1,5 +1,11 @@
 # Process wrapper
 
+[![CI](https://github.com/tentens-tech/process-wrapper/actions/workflows/ci.yml/badge.svg)](https://github.com/tentens-tech/process-wrapper/actions/workflows/ci.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/tentens-tech/process-wrapper)](https://goreportcard.com/report/github.com/tentens-tech/process-wrapper)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Release](https://img.shields.io/github/v/release/tentens-tech/process-wrapper)](https://github.com/tentens-tech/process-wrapper/releases)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/tentens-tech/process-wrapper)](https://go.dev/)
+
 Process manager for containers: runs several processes in one container, checks their health,
 restarts unhealthy ones and exposes the overall state to Kubernetes.
 
@@ -24,6 +30,27 @@ restarts unhealthy ones and exposes the overall state to Kubernetes.
 - memory limit per process
 - small static binary (UPX), runs as non-root with a read-only root filesystem
 
+## Installation
+
+Every [release](https://github.com/tentens-tech/process-wrapper/releases) publishes a multi-arch image
+(linux/amd64, linux/arm64) and static binaries.
+
+```sh
+# Docker image
+docker pull ghcr.io/tentens-tech/process-wrapper:latest
+
+# Binary
+VERSION=v0.10.89
+curl -fsSL "https://github.com/tentens-tech/process-wrapper/releases/download/${VERSION}/process-wrapper_${VERSION}_linux_amd64.tar.gz" | tar xz process-wrapper
+```
+
+Add the binary to your own image:
+
+```dockerfile
+COPY --from=ghcr.io/tentens-tech/process-wrapper:v0.10.89 /usr/bin/process-wrapper /usr/bin/process-wrapper
+ENTRYPOINT ["/usr/bin/process-wrapper"]
+```
+
 ## Quick start
 
 ```sh
@@ -35,7 +62,7 @@ curl localhost:8111/status
 Every file in [examples](examples) is self-contained and starts with a comment explaining how to run it:
 
 | Example | What it shows |
-|---|---|
+| --- | --- |
 | [basic.yaml](examples/basic.yaml) | two processes, file probe, restart after failed probes, `terminationGracePeriod` |
 | [probes.yaml](examples/probes.yaml) | `http`, `tcp`, `exec` and `env` probes on one process |
 | [post-start-hook.yaml](examples/post-start-hook.yaml) | command `postStart` hook (and an SQL one, commented out) |
@@ -58,49 +85,49 @@ Every file in [examples](examples) is self-contained and starts with a comment e
 
 ## Options
 
-```
+```text
   -config string
-    	config file path (if empty, the config is read from the CONFIG env in JSON)
+        config file path (if empty, the config is read from the CONFIG env in JSON)
   -debug
-    	enable debug
+        enable debug
   -envoy-drain
-    	drain envoy listeners in case of preemption
+        drain envoy listeners in case of preemption
   -graceful-shutdown-deadline duration
-    	time between SIGTERM/SIGQUIT and SIGKILL (default 10s)
+        time between SIGTERM/SIGQUIT and SIGKILL (default 10s)
   -php-app-name string
-    	pyroscope application name for PHP profiling (default: $POD_NAMESPACE.$HOSTNAME)
+        pyroscope application name for PHP profiling (default: $POD_NAMESPACE.$HOSTNAME)
   -php-pyroscope-url string
-    	pyroscope URL for PHP profiling via phpscope/phpspy; empty disables it
+        pyroscope URL for PHP profiling via phpscope/phpspy; empty disables it
   -php-rate-hz int
-    	phpspy sampling rate in Hz (default 400)
+        phpspy sampling rate in Hz (default 400)
   -pid-file string
-    	pid file path, written when process-wrapper is not PID 1 (empty disables it) (default "pid")
+        pid file path, written when process-wrapper is not PID 1 (empty disables it) (default "pid")
   -prommerge-async
-    	collect all prometheus targets concurrently (default true)
+        collect all prometheus targets concurrently (default true)
   -prommerge-empty-on-failure
-    	return empty metric list if one of the targets failed
+        return empty metric list if one of the targets failed
   -prommerge-omit-meta
-    	omit HELP strings from merged metrics
+        omit HELP strings from merged metrics
   -prommerge-sort
-    	sort merged series by labels (default true)
+        sort merged series by labels (default true)
   -prommerge-suppress-errors
-    	do not log prometheus target errors
+        do not log prometheus target errors
   -prommerge-supress-errors
-    	deprecated, use -prommerge-suppress-errors
+        deprecated, use -prommerge-suppress-errors
   -pyroscope-url string
-    	pyroscope profiler address, e.g. http://localhost:4040
+        pyroscope profiler address, e.g. http://localhost:4040
   -readiness-file string
-    	readiness file path (default "/tmp/started")
+        readiness file path (default "/tmp/started")
   -shared-lock-url string
-    	shared-lock server url (default "http://localhost:8191")
+        shared-lock server url (default "http://localhost:8191")
   -skip-commands string
-    	comma-separated list of ignored commands
+        comma-separated list of ignored commands
   -version
-    	prints version
+        prints version
   -wait
-    	wait until -readiness-file appears and exit (0 - ready, 1 - deadline exceeded)
+        wait until -readiness-file appears and exit (0 - ready, 1 - deadline exceeded)
   -wait-deadline duration
-    	wait deadline duration (default 2m0s)
+        wait deadline duration (default 2m0s)
 ```
 
 `-skip-commands` lets you keep one universal config with all possible processes and disable some of them per deployment.
@@ -109,7 +136,7 @@ Every file in [examples](examples) is self-contained and starts with a comment e
 ## Environment variables
 
 | Variable | Description |
-|---|---|
+| --- | --- |
 | `CONFIG` | config in JSON format, used when `-config` is not set |
 | `HEALTH_SOCKET` | health/metrics server address, default `:8111` |
 | `LOG_FORMAT` | default `logFormat` for all processes: `free` or `auto` |
@@ -227,7 +254,7 @@ to the whole group, and processes left in the group after the command exits (e.g
 are killed. Descendants that create their own session (`setsid`) are not tracked.
 
 | Probe | Fields | Passes when |
-|---|---|---|
+| --- | --- | --- |
 | `http` | `url` | GET returns 2xx within 5s |
 | `tcp` | `socket` (`host:port`) | connection is established within 2s |
 | `exec` | `command` (`entrypoint`, `args`, `envs`, `dir`) | command exits with 0 within 30s; it inherits the wrapper's env, runs in the process `dir` (unless set) and with the process `credential` |
@@ -300,7 +327,7 @@ Lifecycle events are written to stdout as one JSON line each, for log collectors
 ```
 
 | Event | When |
-|---|---|
+| --- | --- |
 | `restart` | a process is restarted after `failureThreshold` failed probes |
 | `readiness` | a probe failed (successful checks are reported with `-debug` only) |
 | `termination` | the wrapper received a termination signal or the pod is terminated |
@@ -345,7 +372,7 @@ See [shared-lock.yaml](examples/shared-lock.yaml).
 Served on `HEALTH_SOCKET` (default `:8111`).
 
 | Endpoint | Description |
-|---|---|
+| --- | --- |
 | `GET /readiness` | 200 if all processes are healthy, 503 otherwise, during preemption and graceful shutdown |
 | `GET /liveness` | always 200 while the wrapper serves requests: unhealthy processes are restarted by the wrapper itself, so kubelet doesn't restart the whole container |
 | `GET /readiness?wait`, `GET /liveness?wait` | block until the check passes or the client disconnects |
@@ -367,7 +394,7 @@ When all processes are healthy for the first time, the wrapper creates `-readine
 ## Metrics
 
 | Metric | Type | Labels |
-|---|---|---|
+| --- | --- | --- |
 | `sidecar_cmd_readiness_count` | counter | `status`, `process_name`, `cmd` |
 | `sidecar_cmd_acquire_lock_total` | counter | `status`, `process_name`, `cmd` |
 | `sidecar_cmd_duration_seconds` | gauge | `process_name`, `exit_code` |
@@ -387,7 +414,7 @@ from `/proc` and available on Linux only.
 ## Signals
 
 | Signal | Behaviour |
-|---|---|
+| --- | --- |
 | `SIGTERM`, `SIGQUIT` | graceful shutdown: readiness switches to 503, the readiness file is removed, process groups of all processes get SIGTERM; processes still running after `-graceful-shutdown-deadline` are killed |
 | `SIGINT` | fast shutdown: processes are killed immediately |
 | `SIGUSR1`, `SIGUSR2` | print the state of all processes |
@@ -447,3 +474,12 @@ make sec         # gosec
 ```
 
 See [test/README.md](test/README.md) for the e2e suites and which test covers every option.
+
+## Contributing
+
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and how releases are made,
+and [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
+
+## License
+
+Apache License 2.0, see [LICENSE](LICENSE).

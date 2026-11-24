@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/tentens-tech/process-wrapper#readme
+    about: Check the documentation before opening an issue
+  - name: Examples
+    url: https://github.com/tentens-tech/process-wrapper/tree/main/examples
+    about: Self-contained configuration examples for every feature
+  - name: Report a security vulnerability
+    url: https://github.com/tentens-tech/process-wrapper/security/advisories/new
+    about: Please report security issues privately, not in public issues

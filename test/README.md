@@ -29,7 +29,7 @@ Where every option is tested. *unit* — `go test`, otherwise the e2e suite.
 ### Flags
 
 | Flag | Tests |
-|---|---|
+| --- | --- |
 | `-config` | every suite; invalid yaml: `flags` |
 | `-skip-commands` | `flags` |
 | `-readiness-file` | `flags` (default: `basic`, `termination`) |
@@ -48,7 +48,7 @@ Where every option is tested. *unit* — `go test`, otherwise the e2e suite.
 ### Environment variables
 
 | Variable | Tests |
-|---|---|
+| --- | --- |
 | `CONFIG` | `flags`, unit (`TestJSONEnvLoadAllFields`) |
 | `HEALTH_SOCKET` | `flags`, `lock` |
 | `LOG_FORMAT` | `logs` |
@@ -66,7 +66,7 @@ Where every option is tested. *unit* — `go test`, otherwise the e2e suite.
 Every field is parsed from YAML and JSON in unit tests (`pkg/config/load_test.go`, `testdata/all-fields.yaml`).
 
 | Field | Tests |
-|---|---|
+| --- | --- |
 | `name`, `entrypoint`, `args` | every suite |
 | `envs`, `envsFile` | `envs`, `hardening` (missing file) |
 | `dir` | `envs`, `probes` (exec probe), `hooks`, `hardening` (missing dir: unit) |
@@ -95,7 +95,7 @@ Every field is parsed from YAML and JSON in unit tests (`pkg/config/load_test.go
 ### Endpoints, signals, metrics
 
 | | Tests |
-|---|---|
+| --- | --- |
 | `/readiness`, `/liveness` (`?wait`), `/status`, `/pids`, `/pidof` | `basic`, `termination` |
 | `/heartbeat` (GET, PATCH, errors) | `basic`, `heartbeat` |
 | `/metrics`, `/prommerge` | `basic`, `prommerge` |

@@ -1,0 +1,4 @@
+# Badges and pages of workflows that only exist after they are merged to main
+https://github.com/tentens-tech/process-wrapper/actions/workflows/.*
+# Badge images: an external service that sometimes times out
+https://img.shields.io/.*

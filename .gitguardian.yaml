@@ -1,0 +1,4 @@
+# Paths to ignore (test files and e2e configs with mock credentials)
+paths-ignore:
+  - "**/*_test.go"
+  - "test/e2e/**"
