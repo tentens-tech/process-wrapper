@@ -3,7 +3,7 @@
 # The user stays non-root.
 ARG IMAGE=process-wrapper:e2e
 
-FROM golang:1.26-alpine AS fake
+FROM golang:1.27-alpine AS fake
 WORKDIR /src
 COPY fake/main.go .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /e2e-fake main.go
