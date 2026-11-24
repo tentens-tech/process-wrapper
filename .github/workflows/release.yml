@@ -29,7 +29,7 @@ jobs:
     name: Setup Release
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # Required to delete an existing release with force
+      contents: read
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
       prerelease: ${{ steps.resolve.outputs.prerelease }}
@@ -74,15 +74,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.resolve.outputs.tag }}
           FORCE: ${{ inputs.force }}
+        # Only a check: with force, the existing release is replaced in the
+        # release job, after the tests, binaries and images succeeded.
         run: |
-          if gh release view "$TAG" &>/dev/null; then
-            if [ "$FORCE" = "true" ]; then
-              echo "Deleting existing release $TAG"
-              gh release delete "$TAG" --yes
-            else
-              echo "::error::Release $TAG already exists, run the workflow with force to overwrite it"
-              exit 1
-            fi
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" &>/dev/null && [ "$FORCE" != "true" ]; then
+            echo "::error::Release $TAG already exists, run the workflow with force to overwrite it"
+            exit 1
           fi
 
   test:
@@ -248,6 +245,16 @@ jobs:
         run: |
           sha256sum -- *.tar.gz > checksums.txt
           cat checksums.txt
+
+      - name: Delete existing release (force)
+        if: inputs.force
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" &>/dev/null; then
+            echo "Deleting existing release $RELEASE_TAG"
+            gh release delete "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --yes
+          fi
 
       - name: Generate release notes
         env:

@@ -5,6 +5,7 @@ on:
     branches: [ main ]
     paths:
       - '**.go'
+      - '**/testdata/**'
       - 'go.mod'
       - 'go.sum'
       - 'deployment/**'
@@ -18,6 +19,7 @@ on:
     branches: [ main ]
     paths:
       - '**.go'
+      - '**/testdata/**'
       - 'go.mod'
       - 'go.sum'
       - 'deployment/**'
