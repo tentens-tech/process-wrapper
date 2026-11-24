@@ -1,6 +1,7 @@
 # Process wrapper
 
 [![CI](https://github.com/tentens-tech/process-wrapper/actions/workflows/ci.yml/badge.svg)](https://github.com/tentens-tech/process-wrapper/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/tentens-tech/process-wrapper/branch/main/graph/badge.svg)](https://codecov.io/gh/tentens-tech/process-wrapper)
 [![Go Report Card](https://goreportcard.com/badge/github.com/tentens-tech/process-wrapper)](https://goreportcard.com/report/github.com/tentens-tech/process-wrapper)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Release](https://img.shields.io/github/v/release/tentens-tech/process-wrapper)](https://github.com/tentens-tech/process-wrapper/releases)
