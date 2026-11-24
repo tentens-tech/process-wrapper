@@ -614,7 +614,7 @@ trap teardown EXIT
 SUITE=build
 echo "### build"
 if [ -z "${E2E_NO_BUILD:-}" ]; then
-  docker build -q -t $IMG -f "$REPO/deployment/docker/Dockerfile" "$REPO" >/dev/null || { echo "image build failed"; exit 1; }
+  docker build -q -t $IMG -f "$REPO/deployment/docker/Dockerfile-slim" "$REPO" >/dev/null || { echo "image build failed"; exit 1; }
   docker build -q -t $TIMG --build-arg IMAGE=$IMG -f "$E2E/tools.Dockerfile" "$E2E" >/dev/null || { echo "tools image build failed"; exit 1; }
 fi
 docker run -d --name pw-netns alpine:3.24 sleep 86400 >/dev/null

@@ -57,8 +57,9 @@ pre-commit install
 # Build the binary
 make build
 
-# Build the Docker image
-make docker-build
+# Build the Docker images
+make docker-build       # with sidecars
+make docker-build-slim  # process-wrapper only
 ```
 
 ### Run Locally
@@ -184,7 +185,8 @@ Releases are made by maintainers. Pushing a `vX.Y.Z` tag runs the [release workf
 
 - runs the unit tests;
 - builds linux/amd64 and linux/arm64 binaries and attaches them with `checksums.txt` to a GitHub release;
-- pushes a multi-arch image to `ghcr.io/tentens-tech/process-wrapper:vX.Y.Z` (and `:latest` for non-prerelease tags).
+- pushes multi-arch images: `ghcr.io/tentens-tech/process-wrapper:vX.Y.Z` with sidecars and `:vX.Y.Z-slim` with process-wrapper only
+  (and `:latest`, `:latest-slim` for non-prerelease tags).
 
 ```bash
 make release-tag TAG=vX.Y.Z
@@ -218,7 +220,7 @@ Tags with a suffix, such as `v1.2.0-rc.1`, are published as prereleases. The wor
 ```text
 process-wrapper/
 ├── main.go             # Flags, environment variables and startup
-├── deployment/docker/  # Dockerfile
+├── deployment/docker/  # Dockerfile (full image), Dockerfile-slim
 ├── examples/           # Self-contained configuration examples
 ├── pkg/
 │   ├── config/         # Configuration loading (file, CONFIG env, JSON)

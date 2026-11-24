@@ -141,8 +141,10 @@ jobs:
 
   # Every image is built on a native runner, so the RUN steps of the final
   # stage don't need emulation.
+  # Two images per arch: the full one (with sidecars) is tagged vX.Y.Z,
+  # the one with process-wrapper only is tagged vX.Y.Z-slim.
   build-docker:
-    name: Docker ${{ matrix.arch }}
+    name: Docker ${{ matrix.variant }} ${{ matrix.arch }}
     needs: [setup, test]
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -150,11 +152,19 @@ jobs:
       packages: write
     strategy:
       matrix:
+        variant: [full, slim]
+        arch: [amd64, arm64]
         include:
           - arch: amd64
             runner: ubuntu-latest
           - arch: arm64
             runner: ubuntu-24.04-arm
+          - variant: full
+            dockerfile: deployment/docker/Dockerfile
+            suffix: ''
+          - variant: slim
+            dockerfile: deployment/docker/Dockerfile-slim
+            suffix: '-slim'
     env:
       RELEASE_TAG: ${{ needs.setup.outputs.tag }}
     steps:
@@ -173,18 +183,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push ${{ matrix.arch }}
+      - name: Build and push ${{ matrix.variant }} ${{ matrix.arch }}
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          file: deployment/docker/Dockerfile
+          file: ${{ matrix.dockerfile }}
           platforms: linux/${{ matrix.arch }}
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.RELEASE_TAG }}-${{ matrix.arch }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.RELEASE_TAG }}${{ matrix.suffix }}-${{ matrix.arch }}
           build-args: |
             VERSION=${{ env.RELEASE_TAG }}
-          cache-from: type=gha,scope=${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+          cache-from: type=gha,scope=${{ matrix.variant }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}-${{ matrix.arch }}
 
   # Create multi-arch manifest
   docker-manifest:
@@ -208,16 +218,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create and push version manifest
+      - name: Create and push version manifests
         run: |
           IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          docker buildx imagetools create -t "$IMAGE:$RELEASE_TAG" "$IMAGE:$RELEASE_TAG-amd64" "$IMAGE:$RELEASE_TAG-arm64"
+          for s in "" "-slim"; do
+            docker buildx imagetools create -t "$IMAGE:$RELEASE_TAG$s" "$IMAGE:$RELEASE_TAG$s-amd64" "$IMAGE:$RELEASE_TAG$s-arm64"
+          done
 
-      - name: Create and push latest manifest
+      - name: Create and push latest manifests
         if: env.PRERELEASE != 'true'
         run: |
           IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$RELEASE_TAG-amd64" "$IMAGE:$RELEASE_TAG-arm64"
+          docker buildx imagetools create -t "$IMAGE:latest-slim" "$IMAGE:$RELEASE_TAG-slim-amd64" "$IMAGE:$RELEASE_TAG-slim-arm64"
 
   release:
     name: Create Release
@@ -273,16 +286,19 @@ jobs:
           Process manager for containers: runs several processes in one container, checks their health,
           restarts unhealthy ones and exposes the overall state to Kubernetes.
 
-          ### 📦 Docker Image
+          ### 📦 Docker Images
 
           \`\`\`bash
+          # process-wrapper with sidecars (envoy, proxysql, amqproxy, gomcrouter, phpscope)
           docker pull ghcr.io/$REPO:$RELEASE_TAG
+          # process-wrapper only
+          docker pull ghcr.io/$REPO:$RELEASE_TAG-slim
           \`\`\`
 
           Use the binary in your own image:
 
           \`\`\`dockerfile
-          COPY --from=ghcr.io/$REPO:$RELEASE_TAG /usr/bin/process-wrapper /usr/bin/process-wrapper
+          COPY --from=ghcr.io/$REPO:$RELEASE_TAG-slim /usr/bin/process-wrapper /usr/bin/process-wrapper
           \`\`\`
 
           ### ⬇️ Binary

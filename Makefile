@@ -4,7 +4,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 GIT_COMMIT := $(shell git rev-list -1 HEAD)
 
 .DEFAULT_GOAL := build
-.PHONY: help version lint vuln sec test test-race cover e2e clean build build-version docker-build release-tag
+.PHONY: help version lint vuln sec test test-race cover e2e clean build build-version docker-build docker-build-slim release-tag
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -40,9 +40,13 @@ build: ## Build the binary
 build-version: ## Build the binary with the version injected
 	go build -ldflags="-X 'main.version=$(VERSION)'" -o ${BINARY} main.go
 
-docker-build: ## Build the docker image
+docker-build: ## Build the full docker image (process-wrapper with sidecars)
 	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE):$(VERSION) -f deployment/docker/Dockerfile . && \
 	echo "docker run --rm $(IMAGE):$(VERSION) $(BINARY) -version"
+
+docker-build-slim: ## Build the slim docker image (process-wrapper only)
+	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE):$(VERSION)-slim -f deployment/docker/Dockerfile-slim . && \
+	echo "docker run --rm $(IMAGE):$(VERSION)-slim $(BINARY) -version"
 
 release-tag: ## Create and push a release tag, e.g. make release-tag TAG=v0.10.90
 	@test -n "$(TAG)" || { echo "usage: make release-tag TAG=vX.Y.Z"; exit 1; }

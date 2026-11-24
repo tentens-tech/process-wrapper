@@ -33,8 +33,15 @@ restarts unhealthy ones and exposes the overall state to Kubernetes.
 
 ## Installation
 
-Every [release](https://github.com/tentens-tech/process-wrapper/releases) publishes a multi-arch image
-(linux/amd64, linux/arm64) and static binaries.
+Every [release](https://github.com/tentens-tech/process-wrapper/releases) publishes multi-arch images
+(linux/amd64, linux/arm64) and static binaries:
+
+| Image | Contents |
+| --- | --- |
+| `ghcr.io/tentens-tech/process-wrapper:<version>` | process-wrapper and sidecars on `debian:12-slim`, see [Docker](#docker) |
+| `ghcr.io/tentens-tech/process-wrapper:<version>-slim` | process-wrapper only, on `alpine` |
+
+`latest` and `latest-slim` point to the latest release.
 
 ```sh
 # Docker image
@@ -48,7 +55,7 @@ curl -fsSL "https://github.com/tentens-tech/process-wrapper/releases/download/${
 Add the binary to your own image:
 
 ```dockerfile
-COPY --from=ghcr.io/tentens-tech/process-wrapper:v0.10.89 /usr/bin/process-wrapper /usr/bin/process-wrapper
+COPY --from=ghcr.io/tentens-tech/process-wrapper:v0.10.89-slim /usr/bin/process-wrapper /usr/bin/process-wrapper
 ENTRYPOINT ["/usr/bin/process-wrapper"]
 ```
 
@@ -427,12 +434,26 @@ both the shell and the application get them; use `exec` or `trap` to control the
 ## Docker
 
 ```sh
-make docker-build
-# or
-docker build -t process-wrapper:${VERSION} -f deployment/docker/Dockerfile .
+make docker-build       # full image, deployment/docker/Dockerfile
+make docker-build-slim  # slim image, deployment/docker/Dockerfile-slim
 ```
 
-The image runs as an unprivileged user (UID/GID `1010`, change it with `--build-arg UID=... --build-arg GID=...`) and supports a read-only root filesystem.
+The full image is based on `debian:12-slim` and contains, besides process-wrapper, the binaries it usually supervises
+(compressed with UPX):
+
+| Binary | Description |
+| --- | --- |
+| `envoy` | [Envoy](https://www.envoyproxy.io/) proxy |
+| `proxysql` | [ProxySQL](https://proxysql.com/) |
+| `amqproxy` | [AMQProxy](https://github.com/cloudamqp/amqproxy) |
+| `gomcrouter` | [gomcrouter](https://github.com/tentens-tech/gomcrouter) |
+| `phpscope`, `phpspy` | PHP profiling, see `-php-pyroscope-url` |
+
+`GOMAXPROCS` is set to `2`. Both images run as the user `1010`. The working directory of the full image is `/`,
+which isn't writable, so when process-wrapper isn't PID 1 set `-pid-file` to a writable path (e.g. `/tmp/pid`)
+or `-pid-file=""`.
+
+The slim image runs as an unprivileged user (UID/GID `1010`, change it with `--build-arg UID=... --build-arg GID=...`) and supports a read-only root filesystem.
 process-wrapper only writes `-readiness-file` (default `/tmp/started`) and `-pid-file` (relative to the
 working directory `/tmp`), so `/tmp` must be writable:
 
