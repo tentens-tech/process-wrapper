@@ -93,8 +93,13 @@ RUN case "${TARGETARCH}" in \
     apt-get remove -y binutils xz-utils curl lsb-release gnupg && \
     apt-get autoremove -y && \
     rm -f /usr/local/bin/upx && \
-    rm -rf /tmp/* /var/lib/apt/lists/* /var/cache/* && \
-    groupadd --gid "${GID}" appuser && \
+    rm -rf /tmp/* /var/lib/apt/lists/* /var/cache/*
+
+# bash has a readonly UID variable, so use sh for the build args UID and GID.
+SHELL ["/bin/sh", "-c"]
+RUN groupadd --gid "${GID}" appuser && \
     useradd --uid "${UID}" --gid "${GID}" --no-create-home --shell /usr/sbin/nologin appuser
+
+# The working directory is / like in the previous images, set -pid-file to a writable path.
 
 USER ${UID}:${GID}

@@ -449,7 +449,9 @@ The full image is based on `debian:12-slim` and contains, besides process-wrappe
 | `gomcrouter` | [gomcrouter](https://github.com/tentens-tech/gomcrouter) |
 | `phpscope`, `phpspy` | PHP profiling, see `-php-pyroscope-url` |
 
-`GOMAXPROCS` is set to `2`. Both images run as the user `1010`.
+`GOMAXPROCS` is set to `2`. Both images run as the user `1010`. The working directory of the full image is `/`,
+which isn't writable, so when process-wrapper isn't PID 1 set `-pid-file` to a writable path (e.g. `/tmp/pid`)
+or `-pid-file=""`.
 
 The slim image runs as an unprivileged user (UID/GID `1010`, change it with `--build-arg UID=... --build-arg GID=...`) and supports a read-only root filesystem.
 process-wrapper only writes `-readiness-file` (default `/tmp/started`) and `-pid-file` (relative to the

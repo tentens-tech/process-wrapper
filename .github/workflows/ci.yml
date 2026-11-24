@@ -298,7 +298,8 @@ jobs:
             amqproxy --version
             phpspy -v
             for b in gomcrouter phpscope; do
-              test -x "/usr/bin/$b" && echo "$b: ok"
+              test -x "/usr/bin/$b" || { echo "$b: missing"; exit 1; }
+              echo "$b: ok"
             done'
 
   e2e:
