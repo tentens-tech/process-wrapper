@@ -15,20 +15,11 @@ on:
       - 'examples/**'
       - 'test/**'
       - '.github/workflows/ci.yml'
+  # Every PR starts CI, so the "CI Result" check can be required by the branch
+  # ruleset (a required check that never runs blocks the merge). The jobs are
+  # skipped when a PR only changes documentation, see the changes job.
   pull_request:
     branches: [ main ]
-    paths:
-      - '**.go'
-      - '**/testdata/**'
-      - 'go.mod'
-      - 'go.sum'
-      - 'deployment/**'
-      - 'Makefile'
-      - '.golangci.yml'
-      - '.dockerignore'
-      - 'examples/**'
-      - 'test/**'
-      - '.github/workflows/ci.yml'
   workflow_dispatch:
 
 concurrency:
@@ -45,8 +36,50 @@ permissions:
   contents: read
 
 jobs:
+  # Decides whether the code jobs run: a PR that only changes documentation
+  # skips them. Pushes to main are already filtered by paths.
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - name: Checkout code
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Check changed files
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Documentation: Markdown files and the files that only configure docs and issues
+          DOCS='(\.md$|^LICENSE$|^\.github/ISSUE_TEMPLATE/|^\.markdownlint\.json$|^\.lycheeignore$|^\.github/workflows/docs\.yml$)'
+          # A failed diff must fail the job, not skip the checks. --no-renames lists
+          # both paths of a renamed file, so moving code to a docs path runs CI.
+          CHANGED=$(git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA")
+          CODE_FILES=$(echo "$CHANGED" | grep -Ev "$DOCS" || true)
+          if [ -n "$CODE_FILES" ]; then
+            echo "Code changes:"
+            echo "$CODE_FILES"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Only documentation changed, skipping the code jobs"
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
   lint:
     name: Lint
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -83,6 +116,8 @@ jobs:
 
   test:
     name: Test
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -172,6 +207,8 @@ jobs:
 
   build:
     name: Build (${{ matrix.goarch }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -216,6 +253,8 @@ jobs:
 
   docker-build:
     name: Docker Build
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -244,6 +283,8 @@ jobs:
 
   e2e:
     name: End-to-end Tests
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -263,6 +304,8 @@ jobs:
 
   security-scan:
     name: Security Scan
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -321,3 +364,23 @@ jobs:
         continue-on-error: true  # Don't fail the build if Code Scanning is not enabled
         with:
           sarif_file: results.sarif
+
+  # The single check to require in the branch ruleset: it passes when every job
+  # passed or was skipped because the PR only changes documentation.
+  ci-result:
+    name: CI Result
+    needs: [changes, lint, test, build, docker-build, e2e, security-scan]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check job results
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Job results: $RESULTS"
+          for r in $RESULTS; do
+            if [ "$r" != "success" ] && [ "$r" != "skipped" ]; then
+              echo "::error::A CI job finished with result: $r"
+              exit 1
+            fi
+          done
