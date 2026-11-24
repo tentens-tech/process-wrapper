@@ -11,7 +11,7 @@ type Config interface {
 }
 
 func ToJSON(commands []process.Command) ([]byte, error) {
-	data, err := json.Marshal(commands)
+	data, err := json.Marshal(commands) //nolint
 	if err != nil {
 		return nil, err
 	}

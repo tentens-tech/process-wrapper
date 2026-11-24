@@ -5,6 +5,8 @@
 #   go run . -config examples/floating-pid.yaml
 #   curl -i localhost:8111/readiness
 - name: "crashloop"
+  restartBackoff:
+    maxDelay: "2s"              # keep restarting often, default back-off grows up to 1m
   entrypoint: "sh"
   args: ["-c", "sleep 2; exit 1"]
   readiness:

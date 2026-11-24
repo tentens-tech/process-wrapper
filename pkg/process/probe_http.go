@@ -2,10 +2,11 @@ package process
 
 import (
 	"fmt"
-	log "github.com/sirupsen/logrus"
 	"io"
 	"net/http"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 const HTTPProbeTimeoutSeconds = 5

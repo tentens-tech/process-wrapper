@@ -1,0 +1,8 @@
+# isJob: a job with a non-zero exit code stops the wrapper with exit code 1
+- name: "migrate"
+  isJob: true
+  entrypoint: "sh"
+  args: ["-c", "sleep 1; exit 3"]
+- name: "app"
+  entrypoint: "sleep"
+  args: ["3600"]

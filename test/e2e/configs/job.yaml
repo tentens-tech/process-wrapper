@@ -1,0 +1,8 @@
+# isJob: a job that exits 0 is not restarted, the wrapper keeps running
+- name: "migrate"
+  isJob: true
+  entrypoint: "sh"
+  args: ["-c", "echo migrated; sleep 1"]
+- name: "app"
+  entrypoint: "sleep"
+  args: ["3600"]

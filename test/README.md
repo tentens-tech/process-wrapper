@@ -13,12 +13,11 @@ e2e env: `E2E_KEEP=1` keeps the containers, `E2E_NO_BUILD=1` reuses the images,
 ## How e2e works
 
 [`e2e/run.sh`](e2e/run.sh) builds the image from `deployment/docker/Dockerfile` plus a tools layer
-([`e2e/tools.Dockerfile`](e2e/tools.Dockerfile): `curl`, `python3` and the fake services, the user stays 65532) and runs every
+([`e2e/tools.Dockerfile`](e2e/tools.Dockerfile): `curl`, `python3` and the fake services, the user stays 1010) and runs every
 wrapper like in production: read-only root FS, tmpfs `/tmp`, non-root, `--cap-drop ALL`, `no-new-privileges`.
 All containers share the network namespace of `pw-netns`, so `localhost` in the configs reaches the dependencies.
 Dependencies are started only by the suites that need them: MySQL 8.4 (`sql`), RabbitMQ 4 (`amqp`),
-etcd 3.6 (`lock`, `lock-tls` with mTLS certificates generated per run) and
-[`e2e/fake`](e2e/fake/main.go) (`events`): GCE metadata, envoy admin and a UDP metrics-server.
+and [`e2e/fake`](e2e/fake/main.go) (`events`, `lock`): GCE metadata, envoy admin, VMAgent import and a shared lock server with the API of [shared-lock](https://github.com/tentens-tech/shared-lock).
 
 Configs: [`examples/`](../examples) (every example is run) and [`e2e/configs/`](e2e/configs) for the cases the
 examples don't cover.
@@ -36,8 +35,8 @@ Where every option is tested. *unit* — `go test`, otherwise the e2e suite.
 | `-readiness-file` | `flags` (default: `basic`, `termination`) |
 | `-pid-file` | `flags` (`--init`, wrapper isn't PID 1) |
 | `-pyroscope-url` | `flags` (unreachable server doesn't break the wrapper) |
-| `-shared-lock`, `-shared-lock-url` | `lock` |
-| `-shared-lock-etcd-tls` | `lock-tls`, unit (`TestTLSInfoDefaults`) |
+| `-shared-lock-url` | `lock` |
+| `-php-pyroscope-url`, `-php-app-name` | `flags` (missing phpscope binary doesn't break the wrapper) |
 | `-debug` | `flags` |
 | `-wait`, `-wait-deadline` | `flags` (success and timeout) |
 | `-version`, `-h` | `image` |
@@ -53,15 +52,14 @@ Where every option is tested. *unit* — `go test`, otherwise the e2e suite.
 | `CONFIG` | `flags`, unit (`TestJSONEnvLoadAllFields`) |
 | `HEALTH_SOCKET` | `flags`, `lock` |
 | `LOG_FORMAT` | `logs` |
+| `LOG_LEVELS` | `logs`, unit (`TestEffectiveLogLevelsFromEnv`) |
 | `POD_NAMESPACE`, `NODE_NAME`, `HOSTNAME` | `events`, unit (`TestEventLabels`) |
-| `HANDLE_PREEMPTION`, `METADATA_URL` | `events` |
+| `HANDLE_PREEMPTION`, `METADATA_URL` | `events`, unit |
+| `VMAGENT_PUSH_URL` | `events`, unit |
 | `ENVOY_DRAIN_URL` | `events` |
 | `HANDLE_TERMINATION` | unit only (`TestPodStatusStopsWrapperWhenMainContainerCompleted`): the Kubernetes API URL is fixed |
-| `METRICS_SERVER_ADDRESS` | `events`, unit |
 | `METRICS_JSON_EXTRA_LABELS`, `METRICS_EXTRA_LABELS_FILE_PATH`, `METRICS_EXTRA_LABELS_FILE_EXCLUDE` | `events`, unit |
 | `AMQP_PROBE_RABBITMQ_DSN_TEMPLATE`, `_USER`, `_PASS` | `amqp` (from the process `envs` and from the wrapper env) |
-| `SHARED_LEASE_SOCKET`, `SHARED_LEASE_ETCD_ENDPOINTS` | `lock`, `lock-tls` |
-| `SHARED_LEASE_ETCD_CA_CERT`, `_CLIENT_CERT`, `_CLIENT_KEY` | `lock-tls` (set and default paths) |
 
 ### Config
 
@@ -73,6 +71,10 @@ Every field is parsed from YAML and JSON in unit tests (`pkg/config/load_test.go
 | `envs`, `envsFile` | `envs`, `hardening` (missing file) |
 | `dir` | `envs`, `probes` (exec probe), `hooks`, `hardening` (missing dir: unit) |
 | `logFormat` (empty, `auto`, `free`) | `logs`, unit |
+| `logs`, `logLevels` | `logs`, unit |
+| `restartPolicy` | `lifecycle`, unit |
+| `restartBackoff` | `lifecycle`, unit |
+| `isJob` | `lifecycle`, unit |
 | `replicas` (with `postStart`, `promTarget`) | `termination`, unit |
 | `memoryLimitMB` | `memory` |
 | `terminationGracePeriod` | `basic`, unit |
@@ -81,13 +83,14 @@ Every field is parsed from YAML and JSON in unit tests (`pkg/config/load_test.go
 | `readiness.delay`, `period`, `failureThreshold` | `basic`, `probes`, unit |
 | `readiness.http`, `tcp`, `file`, `env`, `exec` | `probes` (pass and fail), unit |
 | `readiness.sql` | `sql` |
-| `readiness.amqp` (`reuseConn`) | `amqp` |
+| `readiness.amqp` | `amqp` |
+| `readiness.dns` | `probes`, unit |
 | `readiness.floatingPid` | `floating`, unit |
 | `readiness.heartBeat` | `heartbeat`, unit |
 | `readiness.lock` (`ttlDuration`) | `lock`, unit |
 | `postStart.command`, `deadline`, `envs` | `hooks`, `hardening`, unit |
 | `postStart.sql` | `sql` |
-| `restartPolicy`, `readiness.startupDeadline` | parsed only (unit), not implemented |
+| `readiness.startupDeadline` | parsed only (unit), not implemented |
 
 ### Endpoints, signals, metrics
 
@@ -96,7 +99,8 @@ Every field is parsed from YAML and JSON in unit tests (`pkg/config/load_test.go
 | `/readiness`, `/liveness` (`?wait`), `/status`, `/pids`, `/pidof` | `basic`, `termination` |
 | `/heartbeat` (GET, PATCH, errors) | `basic`, `heartbeat` |
 | `/metrics`, `/prommerge` | `basic`, `prommerge` |
-| `/debug/*` not exposed | `basic`, `lock`, unit |
+| `/debug/*` not exposed | `basic`, unit |
+| events on stdout | `events`, unit |
 | `SIGTERM`, `SIGQUIT`, `SIGINT`, `SIGUSR1` | `signals`, `termination` |
 | process groups, start retry, output limits | `hardening`, unit |
 | `sidecar_cmd_*` metrics | `basic`, `floating`, `heartbeat`, `hardening`, `lock`, `prommerge` |

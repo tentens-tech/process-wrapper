@@ -2,12 +2,13 @@ package process
 
 import (
 	"context"
-	log "github.com/sirupsen/logrus"
 	"process-wrapper/pkg/metrics"
 	"process-wrapper/pkg/stat"
 	"runtime"
 	"syscall"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 const (

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/prometheus/client_golang/prometheus"
 	"io"
 	"net/http"
 	"os"
@@ -15,18 +14,26 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
 )
 
 const (
-	defaultMetadataURL   = "http://metadata.google.internal/computeMetadata/v1/instance/preempted?wait_for_change=true&timeout_sec=60"
-	defaultEnvoyAdminURL = "http://localhost:15000/drain_listeners"
-	defaultSocket        = ":8111"
-	floatingPidHistory   = 10
-	// Metadata server holds wait_for_change requests up to timeout_sec (60s)
+	defaultMetadataHost          = "http://metadata.google.internal"
+	defaultMetadataPath          = "/computeMetadata/v1/instance/preempted"
+	defaultMetadataQueryParams   = "?wait_for_change=true&timeout_sec=55"
+	defaultMetadataNodePort      = "9889"
+	defaultEnvoyAdminURL         = "http://localhost:15000/drain_listeners?inboundonly"
+	defaultSocket                = ":8111"
+	floatingPidHistory           = 10
+	defaultMetadataMaxRetries    = 10
+	defaultMetadataRetryInterval = 3 * time.Second
+	// Metadata server holds wait_for_change requests up to timeout_sec (55s)
 	metadataClientTimeout = 90 * time.Second
 	metadataRetryDelay    = 5 * time.Second
-	waitPollInterval      = time.Second
+	// Pause between metadata endpoint discovery rounds
+	metadataDiscoveryRetryDelay = time.Minute
+	waitPollInterval            = time.Second
 )
 
 // Health interface implements all probes
@@ -35,7 +42,7 @@ type Health interface {
 	String() string
 }
 
-func HealthRun(name string, h Health, m *metrics.Server) bool {
+func HealthRun(name string, h Health) bool {
 	s := h.Run(name)
 	probeLabels := map[string]string{
 		"event_type":   "readiness",
@@ -43,7 +50,11 @@ func HealthRun(name string, h Health, m *metrics.Server) bool {
 	}
 	probeLabels["probe"] = h.String()
 	probeLabels["status"] = strconv.FormatBool(s)
-	m.PushHealthEvent(probeLabels)
+	metrics.PushHealthEvent(probeLabels)
+
+	if !s {
+		log.Warnf("Failure on %s probe for the %s process", h.String(), name)
+	}
 
 	log.Debugf("Probe: %v, status: %v", h.String(), s)
 	return s
@@ -62,7 +73,7 @@ type State struct {
 	heartBeat        map[string]time.Time
 	cancelRoutineMap map[string]context.CancelFunc
 	preemptedEvent   chan struct{}
-	M                *metrics.Server
+	vmPusher         *metrics.VMAgentPusher
 	mux              *http.ServeMux
 	muxOnce          sync.Once
 	sync.RWMutex
@@ -87,7 +98,6 @@ func NewState(readinessFile string, envoyDrain bool) *State {
 		cancelRoutineMap: make(map[string]context.CancelFunc),
 		preemptedEvent:   make(chan struct{}),
 		envoyDrain:       envoyDrain,
-		M:                metrics.NewMetricsServer(os.Getenv("METRICS_SERVER_ADDRESS")),
 		ReadinessFile:    readinessFile,
 	}
 	go s.CreateReadinessFile()
@@ -95,6 +105,7 @@ func NewState(readinessFile string, envoyDrain bool) *State {
 	preemption := os.Getenv("HANDLE_PREEMPTION")
 	switch preemption {
 	case "true", "1", "enabled":
+		s.vmPusher = metrics.NewVMAgentPusher()
 		var ctx context.Context
 		ctx, s.PreemptedCancel = context.WithCancel(context.Background())
 		go s.PreemptionChecker(ctx)
@@ -279,55 +290,128 @@ var metaHTTPClient *http.Client
 func (s *State) GetMetadataClient() *http.Client {
 	if metaHTTPClient == nil {
 		metaHTTPClient = &http.Client{Timeout: metadataClientTimeout}
-		return metaHTTPClient
 	}
 	return metaHTTPClient
 }
 
-var metadataRequest *http.Request
-
-func (s *State) GetMetadataRequest() (*http.Request, error) {
-	if metadataRequest == nil {
-		var err error
-		metadataURL := os.Getenv("METADATA_URL")
-		if metadataURL == "" {
-			metadataURL = defaultMetadataURL
-		}
-		// #nosec G704 -- URL comes from operator-controlled env (METADATA_URL) or a constant
-		metadataRequest, err = http.NewRequest(http.MethodGet, metadataURL, nil)
-		if err != nil {
-			return nil, err
-		}
-		metadataRequest.Header.Set("Metadata-Flavor", "Google")
-		return metadataRequest, nil
+// determineMetadataEndpoint selects the preemption metadata URL: METADATA_URL,
+// gke-metadata-proxy on the node (NODE_NAME) or the default metadata server
+func (s *State) determineMetadataEndpoint() (string, error) {
+	if metadataURL := os.Getenv("METADATA_URL"); metadataURL != "" {
+		log.Debugf("Using custom metadata URL: %s", metadataURL)
+		return withMetadataQuery(metadataURL), nil
 	}
-	return metadataRequest, nil
+
+	if nodeName := os.Getenv("NODE_NAME"); nodeName != "" {
+		nodeMetadataURL := fmt.Sprintf("http://%s:%s%s", nodeName, defaultMetadataNodePort, defaultMetadataPath)
+		if s.checkMetadataEndpoint(nodeMetadataURL) {
+			log.Debugf("Using gke-metadata-proxy URL: %s", nodeMetadataURL)
+			return nodeMetadataURL + defaultMetadataQueryParams, nil
+		}
+	}
+
+	defaultMetadataURL := defaultMetadataHost + defaultMetadataPath
+	if s.checkMetadataEndpoint(defaultMetadataURL) {
+		log.Debugf("Using default google metadata URL: %s", defaultMetadataURL)
+		return defaultMetadataURL + defaultMetadataQueryParams, nil
+	}
+
+	return "", fmt.Errorf("no suitable metadata endpoint found")
+}
+
+// withMetadataQuery adds the long poll parameters to a custom metadata URL,
+// a URL that already sets wait_for_change is used as is
+func withMetadataQuery(url string) string {
+	switch {
+	case strings.Contains(url, "wait_for_change="):
+		return url
+	case strings.Contains(url, "?"):
+		return url + "&" + strings.TrimPrefix(defaultMetadataQueryParams, "?")
+	default:
+		return url + defaultMetadataQueryParams
+	}
+}
+
+func (s *State) determineMetadataEndpointWithRetry(maxRetries int, retryInterval time.Duration) (string, error) {
+	var metadataURL string
+	var err error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		metadataURL, err = s.determineMetadataEndpoint()
+		if err == nil {
+			return metadataURL, nil
+		}
+		log.Warnf("Failed to determine metadata endpoint (attempt %d/%d): %v", attempt+1, maxRetries, err)
+		time.Sleep(retryInterval)
+	}
+	return "", fmt.Errorf("failed to determine metadata endpoint after %d attempts", maxRetries)
+}
+
+func (s *State) checkMetadataEndpoint(url string) bool {
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: &http.Transport{DisableKeepAlives: true},
+	}
+	// #nosec G704 -- URL comes from operator-controlled env (NODE_NAME) or a constant
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		log.Warnf("Failed to create request for %s: %v", url, err)
+		return false
+	}
+	req.Header.Set("Metadata-Flavor", "Google")
+	resp, err := client.Do(req) // #nosec G704 -- see above
+	if err != nil {
+		log.Debugf("Failed to connect to %s: %v", url, err)
+		return false
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+	return resp.StatusCode == http.StatusOK
 }
 
 func (s *State) WaitPreemptionState() {
+	// Keep looking for the metadata endpoint: a metadata server that comes
+	// up late (or a transient network failure) must not disable preemption
+	// handling for the lifetime of the pod
+	var metadataURL string
 	for {
-		status, err := s.getPreemptionStatus()
+		var err error
+		metadataURL, err = s.determineMetadataEndpointWithRetry(defaultMetadataMaxRetries, defaultMetadataRetryInterval)
+		if err == nil {
+			break
+		}
+		log.Errorf("Failed to determine preemption metadata endpoint, retry in %v: %v", metadataDiscoveryRetryDelay, err)
+		time.Sleep(metadataDiscoveryRetryDelay)
+	}
+	log.Infof("Selected metadata endpoint: %s", metadataURL)
+
+	for {
+		status, err := s.getPreemptionStatus(metadataURL)
 		if err != nil {
 			log.Warnf("Cannot get instance metadata to check node preemption, %v", err)
 			time.Sleep(metadataRetryDelay)
 			continue
 		}
 		if status == "TRUE" {
+			// Stop the traffic first, the push may take up to its timeout
 			s.preemptedEvent <- struct{}{}
-			s.M.PushPreemptedEvent()
 			log.Warnf("Node is preempted and terminated soon")
+			s.vmPusher.PushPreempted(1)
 			return
 		}
 		log.Debugf("Preemption status: %v", status)
+		// Every long poll answer (timeout_sec) refreshes the zero value
+		s.vmPusher.PushPreempted(0)
 	}
 }
 
-func (s *State) getPreemptionStatus() (string, error) {
-	req, err := s.GetMetadataRequest()
+func (s *State) getPreemptionStatus(metadataURL string) (string, error) {
+	// #nosec G704 -- URL comes from operator-controlled env (METADATA_URL, NODE_NAME) or a constant
+	req, err := http.NewRequest(http.MethodGet, metadataURL, nil)
 	if err != nil {
 		return "", fmt.Errorf("build metadata request: %w", err)
 	}
-	resp, err := s.GetMetadataClient().Do(req) // #nosec G704 -- see GetMetadataRequest
+	req.Header.Set("Metadata-Flavor", "Google")
+	resp, err := s.GetMetadataClient().Do(req) // #nosec G704 -- see above
 	if err != nil {
 		return "", err
 	}
@@ -346,7 +430,7 @@ func (s *State) PreemptionChecker(ctx context.Context) {
 	log.Printf("Start preemption checker")
 
 	// Initialize preempted metric to make range vector promql functions work properly
-	s.M.PushInitPreemptedMetric()
+	s.vmPusher.PushPreempted(0)
 	go s.WaitPreemptionState()
 	for {
 		select {
@@ -437,7 +521,7 @@ func (s *State) RemoveReadinessFile() {
 	// The file may not exist if the processes never became ready
 	err := os.Remove(s.ReadinessFile)
 	if err != nil && !os.IsNotExist(err) {
-		log.Errorf("%v", err)
+		log.Warnf("Failed to remove readiness file, %v", err)
 	}
 }
 
@@ -457,13 +541,6 @@ func (s *State) Readiness() bool {
 }
 
 func (s *State) Liveness() bool {
-	for name, state := range s.ProcessState() {
-		log.Debugf("Process %v, healthy state: %v", name, state)
-		if !state {
-			log.WithFields(log.Fields{"name": name}).Warnf("Appliction is degraded")
-			return false
-		}
-	}
 	return true
 }
 
@@ -525,9 +602,6 @@ func (s *State) registerHealthHandlers(mux *http.ServeMux) {
 		}
 		health := s.Liveness()
 		log.Debugf("Liveness status: %v", health)
-		if !health {
-			w.WriteHeader(http.StatusServiceUnavailable)
-		}
 	})
 	mux.HandleFunc("/pidof", func(w http.ResponseWriter, r *http.Request) {
 		log.Debugf("GET /pidof")

@@ -1,0 +1,5 @@
+# Only a job: after it completes the wrapper keeps running until a signal
+- name: "migrate"
+  isJob: true
+  entrypoint: "sh"
+  args: ["-c", "echo migrated"]

@@ -1,0 +1,10 @@
+# Deterministic back-off (no jitter): 200ms, 400ms, 800ms, then the 1s cap
+- name: "crash"
+  restartBackoff:
+    initialDelay: "200ms"
+    maxDelay: "1s"
+    multiplier: 2
+    successThreshold: "1m"
+    jitter: 0
+  entrypoint: "sh"
+  args: ["-c", "exit 1"]
